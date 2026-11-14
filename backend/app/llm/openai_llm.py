@@ -29,20 +29,25 @@ class OpenAICompatLLM:
         # Some local gateways need a non-empty key string.
         self.client = AsyncOpenAI(api_key=api_key or "not-needed", base_url=base_url)
 
-    async def complete(self, system: str, user: str) -> str:
+    async def complete(self, system: str, user: str, on_usage=None) -> str:
         resp = await self.client.chat.completions.create(
             model=self.model, max_tokens=4000,
             messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
         )
+        if on_usage and resp.usage: await on_usage(resp.usage.prompt_tokens,resp.usage.completion_tokens)
         return resp.choices[0].message.content or ""
 
     async def agent_loop(self, *, system, kickoff, tools, dispatch, emit, should_stop,
-                         max_iterations, on_usage=None, inbox=None, get_effort=None):
+                         max_iterations, on_usage=None, inbox=None, get_effort=None, initial_messages=None, on_checkpoint=None):
         oai_tools = _to_openai_tools(tools)
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": kickoff},
         ]
+        if initial_messages:
+            messages=[m for m in initial_messages if m.get('role')!='system']
+            messages.insert(0,{'role':'system','content':system})
+            messages.append({'role':'user','content':'Resume with current policy and persisted context. '+kickoff})
         final_text = ""
         for _ in range(max_iterations):
             if should_stop():
@@ -77,9 +82,13 @@ class OpenAICompatLLM:
             })
 
             if not tool_calls:
+                if on_checkpoint: await on_checkpoint(messages)
                 break
 
             for tc in tool_calls:
+                if should_stop():
+                    messages.append({'role':'tool','tool_call_id':tc.id,'content':'Skipped: task paused'})
+                    continue
                 try:
                     args = json.loads(tc.function.arguments or "{}")
                 except json.JSONDecodeError:
@@ -91,4 +100,5 @@ class OpenAICompatLLM:
                     "tool_call_id": tc.id,
                     "content": (("ERROR: " + out) if is_err else out),
                 })
+            if on_checkpoint: await on_checkpoint(messages)
         return final_text

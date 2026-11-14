@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 from .config import settings
 
 
-class ScopeError(Exception):
+class ScopeError(ValueError):
     pass
 
 
@@ -26,14 +26,14 @@ def _is_private(host: str) -> bool:
     try:
         infos = socket.getaddrinfo(host, None)
     except Exception:
-        return False
+        return True
     for info in infos:
         ip = info[4][0]
         try:
             addr = ipaddress.ip_address(ip)
         except ValueError:
             continue
-        if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:
+        if not addr.is_global or addr.is_multicast:
             return True
     return False
 
@@ -55,6 +55,9 @@ def host_in_patterns(host: str, patterns: list[str]) -> bool:
 
 def check_url(url: str, scope_in: list[str], scope_out: list[str]) -> None:
     """Raise ScopeError if the URL must not be touched."""
+    parsed = urlparse(url if '://' in url else 'https://' + url)
+    if parsed.scheme not in ('http','https') or parsed.username or parsed.password:
+        raise ScopeError('Only HTTP(S) URLs without embedded credentials are allowed')
     host = _host_of(url)
     if not host:
         raise ScopeError(f"Could not parse host from URL: {url}")
@@ -83,5 +86,7 @@ def load_scope(program) -> tuple[list[str], list[str]]:
         si = json.loads(program.scope_in or "[]")
         so = json.loads(program.scope_out or "[]")
     except json.JSONDecodeError:
-        si, so = [], []
+        raise ScopeError('Malformed scope')
+    if not isinstance(si,list) or not isinstance(so,list) or not si:
+        raise ScopeError('Program requires a non-empty scope allowlist')
     return si, so

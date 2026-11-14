@@ -5,14 +5,22 @@ export const WS_URL = API_BASE.replace(/^http/, "ws") + "/ws";
 
 async function j(path: string, opts: RequestInit = {}) {
   const res = await fetch(API_BASE + path, {
+    credentials:"include",
     headers: { "Content-Type": "application/json" },
     ...opts,
   });
-  if (!res.ok) throw new Error((await res.text()) || res.statusText);
+  if (!res.ok) {if(res.status===401&&typeof window!=='undefined')window.dispatchEvent(new Event('reconhawk-auth'));throw new Error((await res.text())||res.statusText);}
   return res.json();
 }
 
 export const api = {
+  login:(token:string)=>j('/api/session',{method:'POST',body:JSON.stringify({token})}),
+  resumeTask:(id:number)=>j(`/api/tasks/${id}/resume`,{method:'POST'}),
+  setEffort:(id:number,effort:string)=>j(`/api/tasks/${id}/effort`,{method:'POST',body:JSON.stringify({effort})}),
+  specs:(id:number)=>j(`/api/tasks/${id}/specs`),
+  mcpServers:()=>j('/api/mcp/servers'),
+  testMcp:()=>j('/api/mcp/test',{method:'POST'}),
+  linkEvidence:(id:number,evidence_ids:number[])=>j(`/api/findings/${id}/evidence`,{method:'PUT',body:JSON.stringify({evidence_ids})}),
   health: () => j("/api/health"),
   providers: () => j("/api/providers"),
   getSettings: () => j("/api/settings"),

@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import re
 
-import httpx
+from ..guard import request
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from . import workspace
 
@@ -17,9 +18,9 @@ AUTH_RE = re.compile(r"(?i)(authorization|bearer|access[_-]?token|x-[a-z-]*token
 
 
 async def _fetch(url: str, timeout: float = 25.0, max_chars: int = 3_000_000) -> str:
-    async with httpx.AsyncClient(follow_redirects=True, verify=False, timeout=timeout) as c:
-        r = await c.get(url, headers=UA)
-        return r.text[:max_chars]
+    r = await request('GET', url, timeout=timeout, max_bytes=max_chars*4)
+    r.raise_for_status()
+    return r.text[:max_chars]
 
 
 async def find_map_url(js_url: str, js_text: str | None = None) -> str | None:
@@ -31,15 +32,9 @@ async def find_map_url(js_url: str, js_text: str | None = None) -> str | None:
     m = re.search(r"//#\s*sourceMappingURL=(\S+)", js_text or "")
     if m:
         ref = m.group(1).strip()
-        if ref.startswith("http"):
-            return ref
-        if ref.startswith("//"):
-            return "https:" + ref
-        # relative to the js file
-        base = js_url.rsplit("/", 1)[0]
-        return base + "/" + ref.lstrip("./")
+        return urljoin(js_url, ref)
     # convention: <bundle>.js.map
-    return js_url + ".map"
+    return urlunsplit(urlsplit(js_url)._replace(path=urlsplit(js_url).path + '.map'))
 
 
 async def reconstruct(task_id: int, map_url: str) -> dict:
@@ -62,6 +57,8 @@ async def reconstruct(task_id: int, map_url: str) -> dict:
         if i >= len(contents) or contents[i] is None:
             continue
         body = contents[i]
+        from ..shapes import capture
+        request_shapes.extend(await capture(task_id, body, map_url + '#' + str(src)))
         # sanitize the webpack path into a safe workspace path
         rel = re.sub(r"^webpack://", "", src).lstrip("/.")
         rel = re.sub(r"[^a-zA-Z0-9_\-./]", "_", rel) or f"src_{i}.js"

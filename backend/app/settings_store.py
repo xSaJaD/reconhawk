@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from sqlalchemy import select
+import json
 
 from .config import settings as env
 from .db import SessionLocal, Setting
@@ -40,6 +41,10 @@ DEFAULTS = {
     "budget_usd_per_task": "0",
     "max_subagents": "4",
     "subagent_max_iterations": "14",
+    "max_steps_per_task": "200",
+    "enable_mcp": "false",
+    "mcp_servers": "[]",
+    "accent_color": "#39d98a",
     "max_passes": "3",  # continuation passes while open leads/ideas remain
     # authenticated testing — account provisioning is OFF by default and hard-capped
     "allow_account_provisioning": "false",
@@ -69,6 +74,16 @@ async def get(key: str, default: str = "") -> str:
 
 
 async def set_many(values: dict) -> None:
+    limits={'agent_max_iterations':(1,500),'max_steps_per_task':(0,10000),'max_subagents':(0,8),'subagent_max_iterations':(1,100),'max_passes':(1,20),'max_test_accounts':(0,2),'budget_usd_per_task':(0,100000),'verify_threshold':(1,100)}
+    for key,value in values.items():
+        if key not in DEFAULTS: raise ValueError('Unknown setting: '+key)
+        if key in limits:
+            number=float(value) if key=='budget_usd_per_task' else int(value)
+            if not limits[key][0]<=number<=limits[key][1]: raise ValueError('Invalid limit: '+key)
+        if DEFAULTS[key] in ('true','false') and str(value) not in ('true','false'): raise ValueError('Invalid boolean')
+        if key=='mcp_servers':
+            from .mcp_client import validate
+            validate(json.loads(value))
     async with SessionLocal() as s:
         for k, v in values.items():
             # Skip masked secret values the UI echoes back unchanged.
@@ -80,6 +95,7 @@ async def set_many(values: dict) -> None:
             else:
                 row.value = str(v)
         await s.commit()
+    if 'scope_enforced' in values: env.scope_enforced=str(values['scope_enforced'])=='true'
 
 
 async def provider_has_key(provider: str | None = None) -> bool:

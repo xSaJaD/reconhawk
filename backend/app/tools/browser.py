@@ -7,6 +7,7 @@ from urllib.parse import urljoin, urlparse
 from playwright.async_api import async_playwright, Browser, Page, Playwright
 
 from ..config import settings
+from ..guard import request as guarded_request, policy
 
 CHROMIUM_PATH = "/opt/pw-browsers/chromium"
 
@@ -24,6 +25,7 @@ class BrowserSession:
         self.js_urls: set[str] = set()
         self.available = False
         self.start_error = ""
+        self.scope_in, self.scope_out = [], []
 
     async def start(self) -> None:
         self._pw = await async_playwright().start()
@@ -33,12 +35,25 @@ class BrowserSession:
         self._browser = await self._pw.chromium.launch(**launch_kwargs)
         ctx = await self._browser.new_context(
             user_agent="ReconHawk/0.1 (security research agent)",
-            ignore_https_errors=True,
+            service_workers='block',
         )
+        await ctx.route('**/*', self._route)
+        await ctx.route_web_socket('**/*', lambda ws: ws.close())
         self._page = await ctx.new_page()
         self._page.on("request", self._on_request)
         self._page.on("response", self._on_response)
         self.available = True
+
+    async def _route(self, route):
+        token=policy.set((self.scope_in,self.scope_out))
+        try:
+            req=route.request
+            res=await guarded_request(req.method,req.url,headers=await req.all_headers(),content=req.post_data_buffer,follow_redirects=False)
+            await route.fulfill(status=res.status_code,headers=dict(res.headers),body=res.content)
+        except Exception:
+            await route.abort('blockedbyclient')
+        finally:
+            policy.reset(token)
 
     def _on_request(self, request) -> None:
         self.network.append(
@@ -133,3 +148,4 @@ class BrowserSession:
         finally:
             if self._pw:
                 await self._pw.stop()
+            self._pw, self._browser, self._page = None, None, None

@@ -85,3 +85,9 @@ pre { white-space: pre-wrap; word-break: break-word; background: var(--panel2);
 .empty { color: var(--muted); font-size: 12px; padding: 20px 0; text-align: center; }
 .dot { width: 8px; height: 8px; border-radius: 99px; display: inline-block; }
 .dot.on { background: var(--accent); } .dot.off { background: var(--crit); }
+
+.session-tabs{display:flex;gap:6px;flex-wrap:wrap;margin:12px 0 18px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+details>summary{cursor:pointer;padding:8px 0}
+[role="tabpanel"]>.panel{margin-bottom:14px}
+@media(max-width:900px){.topbar{flex-wrap:wrap;height:auto}.grid3{grid-template-columns:1fr}}
+@media(max-width:600px){.layout{display:block}.sidebar{max-height:240px;overflow:auto}.grid,.repeater-grid{grid-template-columns:1fr}.main{padding:12px}}

@@ -11,3 +11,7 @@ node_modules/
 frontend/.env.local
 # misc
 *.log
+
+work/
+*.tsbuildinfo
+backend/data/*.db-*

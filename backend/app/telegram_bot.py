@@ -103,6 +103,8 @@ async def _poll_once() -> None:
 
 
 async def _handle_callback(cq: dict) -> None:
+    _,chat=await _cfg()
+    if str(cq.get('message',{}).get('chat',{}).get('id',''))!=str(chat): return
     data = cq.get("data", "")
     cq_id = cq.get("id")
     if data.startswith("submit:"):

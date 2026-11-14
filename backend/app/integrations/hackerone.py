@@ -65,8 +65,12 @@ class HackerOneClient:
         return (await self._get(f"/programs/{handle}")).get("data", {})
 
     async def get_scopes(self, handle: str) -> list[dict]:
-        data = await self._get(f"/programs/{handle}/structured_scopes", {"page[size]": 100})
-        return data.get("data", [])
+        rows=[]
+        for page in range(1,101):
+            data=await self._get(f"/programs/{handle}/structured_scopes",{'page[size]':100,'page[number]':page})
+            rows.extend(data.get('data',[]))
+            if not data.get('links',{}).get('next'): return rows
+        raise HackerOneError('Incomplete scope pagination; refusing partial scope')
 
     async def get_report(self, report_id: str) -> dict:
         return (await self._get(f"/reports/{report_id}")).get("data", {})
@@ -99,7 +103,7 @@ class HackerOneClient:
 def normalize_scopes(scopes: list[dict]) -> tuple[list[str], list[str]]:
     """Turn H1 structured scopes into ReconHawk in/out host lists.
     URL-type, submission-eligible assets go in-scope."""
-    scope_in = []
+    scope_in,scope_out = [],[]
     for s in scopes:
         a = s.get("attributes", {})
         ident = (a.get("asset_identifier") or "").strip()
@@ -108,4 +112,6 @@ def normalize_scopes(scopes: list[dict]) -> tuple[list[str], list[str]]:
             continue
         if atype in ("URL", "WILDCARD", "DOMAIN") and a.get("eligible_for_submission", True):
             scope_in.append(ident)
-    return scope_in, []
+        elif atype in ('URL','WILDCARD','DOMAIN'):
+            scope_out.append(ident)
+    return scope_in, scope_out

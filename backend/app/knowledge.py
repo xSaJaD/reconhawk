@@ -18,6 +18,8 @@ def host_of(url: str) -> str:
 async def remember(content: str, category: str = "note", scope: str = "global",
                    task_id: int | None = None) -> int:
     async with SessionLocal() as s:
+        old=(await s.execute(select(Memory).where(Memory.scope==scope,Memory.category==category,Memory.content==content))).scalars().first()
+        if old: return old.id
         m = Memory(content=content, category=category, scope=scope, task_id=task_id)
         s.add(m)
         await s.commit()
@@ -104,7 +106,7 @@ async def skills_context() -> str:
         return ""
     lines = ["You have the following loaded testing playbooks. Apply them where relevant:"]
     for sk in skills:
-        lines.append(f"\n### {sk.name} ({sk.category})\n{sk.playbook}")
+        lines.append(f"\n### {sk.name} ({sk.category})\n{sk.playbook}\n{sk.payloads_json}\n{sk.bypass_table_md}\n{sk.references_md}")
     return "\n".join(lines)
 
 

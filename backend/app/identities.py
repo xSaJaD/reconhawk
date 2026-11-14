@@ -17,7 +17,7 @@ async def get_by_label(task_id: int, label: str) -> Identity | None:
     for r in rows:
         if r.program_id == pid:
             return r
-    return rows[0] if rows else None
+    return next((row for row in rows if row.program_id is None), None)
 
 
 def auth_headers(identity: Identity) -> dict:

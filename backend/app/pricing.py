@@ -22,10 +22,10 @@ def estimate_cost(model: str, tokens_in: int, tokens_out: int) -> float | None:
     price = PRICING.get(key)
     if price is None:
         # try a prefix match (e.g. provider/model on openrouter)
-        for k, v in PRICING.items():
-            if k in key:
+        for k, v in sorted(PRICING.items(), key=lambda item: -len(item[0])):
+            if key.rsplit('/',1)[-1] == k or key.rsplit('/',1)[-1].startswith(k + '-'):
                 price = v
                 break
     if price is None:
         return None
-    return round(tokens_in / 1_000_000 * price[0] + tokens_out / 1_000_000 * price[1], 4)
+    return tokens_in / 1_000_000 * price[0] + tokens_out / 1_000_000 * price[1]

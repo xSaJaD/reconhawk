@@ -399,3 +399,13 @@ TOOLS = [
         },
     },
 ]
+
+for t in TOOLS:
+    if t['name']=='record_finding':
+        t['input_schema']['properties']['evidence_ids']={'type':'array','items':{'type':'integer'}}
+        t['input_schema']['required'].append('evidence_ids')
+TOOLS.extend([
+ {'name':'resolve_lead','description':'Close or promote a lead with a factual reason.','input_schema':{'type':'object','properties':{'lead_id':{'type':'integer'},'status':{'type':'string','enum':['open','chasing','closed','promoted']},'reason':{'type':'string'}},'required':['lead_id','status','reason']}},
+ {'name':'list_specs','description':'List saved AST API request shapes.','input_schema':{'type':'object','properties':{}}},
+ {'name':'probe_spec','description':'Send one saved request shape. Supply symbolic values explicitly.','input_schema':{'type':'object','properties':{'spec_id':{'type':'integer'},'body':{},'headers':{'type':'object'},'params':{'type':'object'},'confirm_write':{'type':'boolean'}},'required':['spec_id']}}
+])

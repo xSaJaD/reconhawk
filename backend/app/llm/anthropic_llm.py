@@ -9,16 +9,21 @@ class AnthropicLLM:
         self.effort = effort
         self.client = AsyncAnthropic(api_key=api_key)
 
-    async def complete(self, system: str, user: str) -> str:
+    async def complete(self, system: str, user: str, on_usage=None) -> str:
         resp = await self.client.messages.create(
             model=self.model, max_tokens=4000, system=system,
             messages=[{"role": "user", "content": user}],
         )
+        if on_usage: await on_usage(resp.usage.input_tokens,resp.usage.output_tokens)
         return "".join(b.text for b in resp.content if b.type == "text")
 
     async def agent_loop(self, *, system, kickoff, tools, dispatch, emit, should_stop,
-                         max_iterations, on_usage=None, inbox=None, get_effort=None):
+                         max_iterations, on_usage=None, inbox=None, get_effort=None, initial_messages=None, on_checkpoint=None):
         messages = [{"role": "user", "content": kickoff}]
+        if initial_messages:
+            messages=[m for m in initial_messages if m.get('role')!='system']
+
+            messages.append({'role':'user','content':'Resume with current policy and persisted context. '+kickoff})
         final_text = ""
         for _ in range(max_iterations):
             if should_stop():
@@ -37,7 +42,8 @@ class AnthropicLLM:
             kwargs["output_config"] = {"effort": (get_effort() if get_effort else self.effort)}
             try:
                 resp = await self.client.messages.create(**kwargs)
-            except Exception:
+            except Exception as e:
+                if getattr(e,'status_code',None) not in (400,422): raise
                 # Retry once without the newer knobs for older models / gateways.
                 kwargs.pop("thinking", None)
                 kwargs.pop("output_config", None)
@@ -53,16 +59,21 @@ class AnthropicLLM:
                     await emit("log", "", {"text": block.text})
 
             if resp.stop_reason == "pause_turn":
-                messages.append({"role": "assistant", "content": resp.content})
+                messages.append({"role": "assistant", "content": [b.model_dump(exclude_none=True) for b in resp.content]})
                 continue
 
             tool_uses = [b for b in resp.content if b.type == "tool_use"]
             if resp.stop_reason == "end_turn" or not tool_uses:
+                messages.append({'role':'assistant','content':[b.model_dump(exclude_none=True) for b in resp.content]})
+                if on_checkpoint: await on_checkpoint(messages)
                 break
 
-            messages.append({"role": "assistant", "content": resp.content})
+            messages.append({"role": "assistant", "content": [b.model_dump(exclude_none=True) for b in resp.content]})
             results = []
             for tu in tool_uses:
+                if should_stop():
+                    results.append({'type':'tool_result','tool_use_id':tu.id,'content':'Skipped: task paused','is_error':True})
+                    continue
                 await emit("tool_call", tu.name, {"tool": tu.name, "input": tu.input})
                 out, is_err = await dispatch(tu.name, tu.input or {})
                 results.append({
@@ -70,4 +81,5 @@ class AnthropicLLM:
                     "content": out, "is_error": is_err,
                 })
             messages.append({"role": "user", "content": results})
+            if on_checkpoint: await on_checkpoint(messages)
         return final_text

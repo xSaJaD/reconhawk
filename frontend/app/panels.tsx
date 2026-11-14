@@ -32,7 +32,7 @@ export function SettingsModal({ onClose }: any) {
   const prov = providers[cfg.llm_provider] || {};
   const upd = (k: string, v: any) => setCfg({ ...cfg, [k]: v });
 
-  const save = async () => { await api.putSettings(cfg); setSaved(true); setTimeout(() => setSaved(false), 1500); };
+  const save=async()=>{try{await api.putSettings(cfg);document.documentElement.style.setProperty('--accent',cfg.accent_color);setSaved(true);setTimeout(()=>setSaved(false),1500);}catch(e:any){setTest(e.message);}};
   const runTest = async () => {
     setTest("…");
     await api.putSettings(cfg);
@@ -136,6 +136,14 @@ export function SettingsModal({ onClose }: any) {
             <input value={cfg.max_test_accounts} onChange={(e) => upd("max_test_accounts", e.target.value)} /></div>
         </div>
 
+        <details><summary>Usage, limits, appearance and MCP</summary>
+        <div className="repeater-grid">{[['max_steps_per_task','Total model steps (0 = unlimited)'],['budget_usd_per_task','Task budget USD'],['max_subagents','Parallel specialists'],['subagent_max_iterations','Specialist iterations'],['max_passes','Continuation passes']].map(([key,label])=><div className="field" key={key}><label>{label}</label><input type="number" min="0" value={cfg[key]} onChange={e=>upd(key,e.target.value)}/></div>)}</div>
+        <div className="field"><label>Enforce scope</label><select value={cfg.scope_enforced} onChange={e=>upd('scope_enforced',e.target.value)}><option value="true">on</option><option value="false">off</option></select></div>
+        <div className="field"><label>Accent</label><input type="color" value={cfg.accent_color} onChange={e=>upd('accent_color',e.target.value)}/></div>
+        <p className="muted">Use trusted MCP servers with explicit tool allowlists. Servers must enforce their own outbound scope. Local stdio also requires shell enabled.</p>
+        <select value={cfg.enable_mcp} onChange={e=>upd('enable_mcp',e.target.value)}><option value="false">MCP disabled</option><option value="true">MCP enabled</option></select>
+        <textarea aria-label="MCP servers JSON" rows={6} value={cfg.mcp_servers} onChange={e=>upd('mcp_servers',e.target.value)}/>
+        </details>
         {test && <div className="mono" style={{ fontSize: 12, margin: "6px 0", color: test.startsWith("✓") ? "var(--accent)" : "var(--crit)" }}>{test}</div>}
         <div className="row" style={{ justifyContent: "space-between" }}>
           <button onClick={runTest}>Test connection</button>
@@ -260,6 +268,7 @@ export function OverviewStrip({ taskId, refreshKey }: any) {
       <Stat label="Repeater" value={ov.repeater} />
       <Stat label="Files" value={ov.files} />
       <Stat label="Duration" value={dur} />
+      {ov.cost?.price_unknown&&<span className="pill">Partial cost: unknown model pricing</span>}
       {ov.cost && <Stat label="Cost" value={ov.cost.usd ? `$${ov.cost.usd.toFixed(3)}` : `${((ov.cost.tokens_in + ov.cost.tokens_out) / 1000).toFixed(1)}k tok`} accent="var(--warn)" />}
     </div>
   );
@@ -614,6 +623,7 @@ async function copy(text: string) {
 }
 
 export function FindingCard({ f, onChange }: any) {
+  const [proof,setProof]=useState((f.evidence_ids||[]).join(', '));
   const [adds, setAdds] = useState<any[]>([]);
   const [open, setOpen] = useState(false);
   const [kind, setKind] = useState("poc");
@@ -653,6 +663,7 @@ export function FindingCard({ f, onChange }: any) {
         </div>
       </div>
       <div className="muted" style={{ fontSize: 12, margin: "4px 0" }}>{f.summary}</div>
+      <details><summary>Proof requests · quality {f.evidence_score||0}/100</summary><div className="row"><input aria-label="Proof request IDs" value={proof} onChange={e=>setProof(e.target.value)} placeholder="12, 15"/><button onClick={async()=>{try{const ids=proof.split(',').filter((x:string)=>x.trim()).map(Number);if(ids.some((i:number)=>!Number.isInteger(i)||i<1))throw Error('Positive request IDs required');await api.linkEvidence(f.id,ids);onChange();flash('Linked; verify again');}catch(e:any){flash(e.message);}}}>Link evidence</button></div></details>
       {f.verdict && <div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{f.verdict}</div>}
 
       <div className="row" style={{ gap: 6, margin: "8px 0", flexWrap: "wrap" }}>
@@ -973,7 +984,7 @@ export function RepeaterPanel({ taskId, history, onSent }: any) {
               <div key={r.id} className="endpoint">
                 <span className="method">{r.method}</span>
                 <span className={r.status_code && r.status_code < 400 ? "sev-low" : "sev-high"}> {r.status_code}</span> {r.url}
-                <span className="muted"> · {r.duration_ms}ms</span>
+                <span className="muted"> · #{r.id} · {r.duration_ms}ms</span><button onClick={async()=>{try{await api.instruct(taskId,`Review captured request #${r.id}: ${r.method} ${r.url}`);}catch(e:any){setErr(e.message);}}}>Instruct agent</button>
               </div>
             ))}
           </div>

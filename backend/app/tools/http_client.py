@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 
-import httpx
+from ..guard import request
 
 
 async def send_request(
@@ -13,22 +13,16 @@ async def send_request(
     timeout: float = 20.0,
     max_response_chars: int = 20000,
 ) -> dict:
-    headers = headers or {}
+    headers = dict(headers or {})
     headers.setdefault("User-Agent", "ReconHawk/0.1 (security research)")
     started = time.perf_counter()
-    async with httpx.AsyncClient(follow_redirects=True, verify=False, timeout=timeout) as client:
-        resp = await client.request(
-            method.upper(),
-            url,
-            headers=headers,
-            content=body.encode() if body else None,
-        )
-        text = resp.text
+    resp = await request(method.upper(), url, headers=headers, content=body.encode() if body else None, timeout=timeout)
+    text = resp.text
     duration_ms = int((time.perf_counter() - started) * 1000)
     # Classify the response so the agent treats an SPA shell / auth gate as a SIGNAL, not a dead end.
     ct = resp.headers.get("content-type", "").lower()
     low = text[:2000].lower()
-    is_spa = ("text/html" in ct) and ('id="root"' in low or "<!doctype html" in low or "<div id=app" in low)
+    is_spa = ("text/html" in ct) and ('id="root"' in low  or 'id="app"' in low or 'id="__next"' in low)
     if is_spa:
         hint = "SPA_SHELL — wrong request shape (not a dead endpoint). Supply the schema's required body/params/auth."
     elif resp.status_code in (401, 403):

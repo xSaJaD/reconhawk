@@ -14,9 +14,16 @@ from ..tools.browser import BrowserSession
 from ..tools import http_client, jsanalyze, workspace
 from .. import settings_store, intel, notify, verify, reporting, telegram_bot, knowledge, pricing
 from ..llm import build_llm
+from ..guard import policy
+from .. import redact
+from ..db import EndpointSpec
 from .prompts import SYSTEM_PROMPT, task_kickoff
 from .tools import TOOLS, WORKSPACE_TOOLS
 from sqlalchemy import select, desc
+
+ACTIVE = {}
+RUNS = {}
+PROVISION_LOCKS = {}
 
 STOP_FLAGS: dict[int, asyncio.Event] = {}
 INBOX: dict[int, asyncio.Queue] = {}  # operator messages queued into a running agent
@@ -55,7 +62,12 @@ class AgentRun:
         self.tok_in = 0
         self.tok_out = 0
         self.cost = 0.0
-        self.budget_usd = 0.0  # 0 = unlimited
+        self.budget_usd = 0.0
+        self.steps=0
+        self.max_steps=0
+        self.stop_reason=''
+        self.mcp=None
+        self.background=set()
 
     def _drain_inbox(self) -> list[str]:
         msgs = []
@@ -73,34 +85,26 @@ class AgentRun:
             ideas = (await s.execute(
                 select(Idea).where(Idea.task_id == self.task_id, Idea.status.in_(["queued", "chasing"]))
                 .order_by(Idea.priority).limit(15))).scalars().all()
-            out.extend(f"idea: {i.text}" for i in ideas)
+            out.extend(f"idea #{i.id}: {i.text}" for i in ideas)
             leads = (await s.execute(
                 select(Lead).where(Lead.task_id == self.task_id, Lead.status.in_(["open", "chasing"]))
                 .limit(15))).scalars().all()
-            out.extend(f"lead: {l.title}" for l in leads)
+            out.extend(f"lead #{l.id}: {l.title}" for l in leads)
         return out
 
-    async def _on_usage(self, tin: int, tout: int) -> None:
-        self.tok_in += tin
-        self.tok_out += tout
-        c = pricing.estimate_cost(self._model_name, tin, tout)
-        if c:
-            self.cost += c
-        async with SessionLocal() as s:
-            s.add(TokenUsage(task_id=self.task_id, provider=self._provider_name,
-                             model=self._model_name, input_tokens=tin, output_tokens=tout))
-            t = await s.get(Task, self.task_id)
-            if t:
-                t.tokens_in = self.tok_in
-                t.tokens_out = self.tok_out
-                t.cost_usd = round(self.cost, 4)
-                t.steps = (t.steps or 0) + 1
-            await s.commit()
-        # Budget stop (pause, don't drop evidence)
-        if self.budget_usd and self.cost >= self.budget_usd:
-            await bus.emit(self.task_id, "log",
-                           f"⏸ Budget reached (${self.cost:.2f} ≥ ${self.budget_usd:.2f}) — stopping.", {})
+    async def _on_usage(self,tin,tout,provider=None,model=None):
+        from ..usage import record
+        self.cost,self.steps=await record(self.task_id,provider or self._provider_name,model or self._model_name,tin,tout)
+        if (self.budget_usd and self.cost>=self.budget_usd) or (self.max_steps and self.steps>=self.max_steps):
+            self.stop_reason='budget or step limit'
             self.stop.set()
+
+    async def _checkpoint(self,messages):
+        async with SessionLocal() as session:
+            task=await session.get(Task,self.task_id)
+            if task:
+                task.checkpoint=json.dumps({'provider':self._provider_name,'model':self._model_name,'messages':messages},default=str)
+                await session.commit()
 
     async def _verify_and_notify(self, finding_id: int) -> None:
         """Run the skeptical verification pass, then (if confirmed) auto-deliver to Telegram
@@ -108,13 +112,13 @@ class AgentRun:
         try:
             cfg = await settings_store.get_all()
             if cfg.get("auto_verify", "true") == "true":
-                res = await verify.verify_finding(finding_id)
+                res = await verify.verify_finding(finding_id,on_usage=lambda tin,tout:self._on_usage(tin,tout,cfg.get('worker_provider') or self._provider_name,cfg.get('worker_model') or self._model_name))
                 await bus.emit(self.task_id, "log",
                                f"Verification: confidence={res['confidence']}% verified={res['verified']}",
                                res)
                 verified = res["verified"]
             else:
-                verified = True
+                verified = False
             if verified and cfg.get("auto_telegram", "true") == "true":
                 await telegram_bot.send_report(finding_id)
             if verified and cfg.get("auto_submit", "false") == "true":
@@ -125,7 +129,25 @@ class AgentRun:
         except Exception as e:  # noqa: BLE001
             await bus.emit(self.task_id, "log", f"Verification error: {e}", {"error": str(e)})
 
-    async def dispatch(self, name: str, args: dict) -> tuple[str, bool]:
+    async def dispatch(self,name,args):
+        token=policy.set((self.scope_in,self.scope_out))
+        try:
+            if self.stop.is_set(): return 'Task paused.',True
+            if name=='run_command' and (await settings_store.get('enable_shell'))!='true':
+                return 'Shell is disabled.',True
+            if name.startswith('mcp__'):
+                if not self.mcp or (await settings_store.get('enable_mcp'))!='true': return 'MCP disabled.',True
+                return await self.mcp.call(name,args)
+            if name=='register_test_account':
+                async with PROVISION_LOCKS.setdefault(self.program_id,asyncio.Lock()):
+                    return await self._dispatch(name,args)
+            return await self._dispatch(name,args)
+        except Exception as e:
+            return str(e),True
+        finally:
+            policy.reset(token)
+
+    async def _dispatch(self, name: str, args: dict) -> tuple[str, bool]:
         try:
             if "url" in args and isinstance(args["url"], str) and args["url"] \
                     and name in ("browser_navigate", "analyze_js", "analyze_source_map",
@@ -172,6 +194,8 @@ class AgentRun:
             if name == "resolve_idea":
                 async with SessionLocal() as s:
                     idea = await s.get(Idea, int(args["idea_id"]))
+                    if not idea or idea.task_id != self.task_id:
+                        return 'Idea belongs to another scan.',True
                     if idea:
                         idea.status = args.get("status", "done")
                         await s.commit()
@@ -199,6 +223,7 @@ class AgentRun:
                 return "Asset recorded.", False
 
             if name == "set_effort":
+                if args['effort'] not in ('low','medium','high','xhigh','max'): return 'Invalid effort.',True
                 self.effort = args["effort"]
                 await bus.emit(self.task_id, "log", f"Effort set to {args['effort']}", {"effort": args["effort"]})
                 return f"Effort set to {args['effort']}.", False
@@ -261,7 +286,10 @@ class AgentRun:
                 return json.dumps(self.browser.recorded_requests()[:200]), False
 
             if name == "analyze_js":
-                res = await jsanalyze.fetch_and_analyze(args["url"])
+                source=await jsanalyze.fetch_js(args['url'])
+                res=jsanalyze.analyze(source)
+                from ..shapes import capture
+                res['request_shapes']=await capture(self.task_id,source,args['url'])
                 await bus.emit(self.task_id, "log",
                                f"Analyzed JS ({res['endpoint_count']} endpoints) {args['url']}",
                                {"url": args["url"], "interesting": res["interesting_endpoints"][:20],
@@ -301,17 +329,21 @@ class AgentRun:
                 res = await http_client.send_request(args["method"], args["url"],
                                                      headers=args.get("headers"), body=args.get("body"))
                 async with SessionLocal() as s:
-                    s.add(RepeaterRequest(
+                    request_row=RepeaterRequest(
                         task_id=self.task_id, method=args["method"].upper(), url=args["url"],
-                        request_headers=json.dumps(args.get("headers") or {}), request_body=args.get("body") or "",
-                        status_code=res["status_code"], response_headers=json.dumps(res["response_headers"]),
-                        response_body=res["response_body"], duration_ms=res["duration_ms"]))
+                        request_headers=json.dumps(redact.headers(args.get("headers") or {})), request_body=redact.text(args.get("body") or ""),
+                        status_code=res["status_code"], response_headers=json.dumps(redact.headers(res["response_headers"])),
+                        response_body=redact.text(res["response_body"]), duration_ms=res["duration_ms"])
+                    s.add(request_row)
                     await s.commit()
+                    await s.refresh(request_row)
+                    request_id=request_row.id
                 await bus.emit(self.task_id, "repeater",
                                f"{args['method'].upper()} {args['url']} → {res['status_code']}",
                                {"method": args["method"].upper(), "url": args["url"],
                                 "status": res["status_code"], "duration_ms": res["duration_ms"]})
                 fb = {k: res.get(k) for k in ("status_code", "response_headers", "duration_ms", "final_url", "truncated", "classification")}
+                fb["repeater_id"]=request_id
                 fb["response_body"] = res["response_body"][:8000]
                 return json.dumps(fb), False
 
@@ -334,7 +366,7 @@ class AgentRun:
                 if name == "replay_as":
                     async with SessionLocal() as s:
                         orig = await s.get(RepeaterRequest, int(args["repeater_id"]))
-                        if not orig:
+                        if not orig or orig.task_id != self.task_id:
                             return f"No repeater request #{args['repeater_id']}.", True
                         method, url = orig.method, orig.url
                         base_headers = json.loads(orig.request_headers or "{}")
@@ -348,16 +380,20 @@ class AgentRun:
                 base_headers.update(idmod.auth_headers(ident))
                 res = await http_client.send_request(method, url, headers=base_headers, body=body)
                 async with SessionLocal() as s:
-                    s.add(RepeaterRequest(task_id=self.task_id, method=method.upper(), url=url,
-                        request_headers=json.dumps({**base_headers, "Cookie": "[identity:" + label + "]",
+                    request_row=RepeaterRequest(task_id=self.task_id, method=method.upper(), url=url,
+                        request_headers=json.dumps({**redact.headers(base_headers), "Cookie": "[identity:" + label + "]",
                                                     "Authorization": "[identity:" + label + "]"}),
                         request_body=body or "", status_code=res["status_code"],
-                        response_headers=json.dumps(res["response_headers"]),
-                        response_body=res["response_body"], duration_ms=res["duration_ms"]))
+                        response_headers=json.dumps(redact.headers(res["response_headers"])),
+                        response_body=redact.text(res["response_body"]), duration_ms=res["duration_ms"])
+                    s.add(request_row)
                     await s.commit()
+                    await s.refresh(request_row)
+                    request_id=request_row.id
                 await bus.emit(self.task_id, "repeater", f"as {label}: {method.upper()} {url} → {res['status_code']}",
                                {"identity": label, "method": method.upper(), "url": url, "status": res["status_code"]})
                 fb = {k: res.get(k) for k in ("status_code", "duration_ms", "classification")}
+                fb["repeater_id"]=request_id
                 fb["response_body"] = res["response_body"][:8000]
                 fb["note"] = ("IDOR/BOLA check: if this response (as " + label + ") returns another user's "
                               "object, you've proven it. Capture ONE adjacent object, REDACT PII.")
@@ -413,6 +449,37 @@ class AgentRun:
                 await bus.emit(self.task_id, "log", f"Provisioned test identity '{args['label']}' (bounded, scope-checked).", {})
                 return f"Test account '{args['label']}' provisioned and stored as an identity. Use replay_as for IDOR/BOLA.", False
 
+            if name=='resolve_lead':
+                async with SessionLocal() as session:
+                    lead=await session.get(Lead,int(args['lead_id']))
+                    if not lead or lead.task_id!=self.task_id: return 'Lead not in scan.',True
+                    if args['status'] not in ('open','chasing','closed','promoted'): return 'Invalid status.',True
+                    lead.status=args['status']
+                    lead.rationale+='\\nResolution: '+args.get('reason','')
+                    await session.commit()
+                await bus.emit(self.task_id,'lead','Lead updated',{'id':lead.id})
+                return 'Lead resolved.',False
+            if name=='list_specs':
+                async with SessionLocal() as session:
+                    rows=(await session.execute(select(EndpointSpec).where(EndpointSpec.task_id==self.task_id))).scalars().all()
+                return json.dumps([{'id':x.id,'url':x.url,'method':x.method,'shape':json.loads(x.shape)} for x in rows]),False
+            if name=='probe_spec':
+                from ..shapes import unresolved
+                from urllib.parse import urlencode
+                async with SessionLocal() as session:
+                    spec=await session.get(EndpointSpec,int(args['spec_id']))
+                if not spec or spec.task_id!=self.task_id: return 'Spec not in scan.',True
+                shape=json.loads(spec.shape)
+                body=args.get('body',shape.get('body'))
+                headers=args.get('headers',shape.get('headers',{}))
+                params=args.get('params',shape.get('params',{}))
+                if any(unresolved(v) for v in (body,headers,params)): return 'Supply unresolved values explicitly.',True
+                if spec.method not in ('GET','HEAD','OPTIONS') and not args.get('confirm_write'): return 'Write confirmation required.',True
+                if isinstance(body,(dict,list)):
+                    body=json.dumps(body);headers={**headers,'Content-Type':'application/json'}
+                url=spec.url+(('&' if '?' in spec.url else '?')+urlencode(params) if params else '')
+                return await self.dispatch('http_request',{'method':spec.method,'url':url,'body':body,'headers':headers})
+
             if name == "record_lead":
                 async with SessionLocal() as s:
                     s.add(Lead(task_id=self.task_id, title=args["title"], url=args.get("url", ""),
@@ -427,6 +494,7 @@ class AgentRun:
                 if self.is_subagent:
                     return "Sub-agents cannot spawn further sub-agents.", True
                 brief = args.get("brief") or args.get("summary") or args.get("task") or ""
+                if not self.subagent_cap: return 'Specialists disabled.',True
                 report = await SubAgentRun(self, args["name"], args.get("role", "recon"), brief).run()
                 return f"Sub-agent '{args['name']}' finished. Its report:\n{report}", False
 
@@ -438,7 +506,7 @@ class AgentRun:
                     cap = int(await settings_store.get("max_subagents", "4"))
                 except ValueError:
                     cap = 4
-                specs = (args.get("agents") or [])[:cap]
+                specs = (args.get("agents") or [])[:max(0,min(cap,self.subagent_cap))]
                 if not specs:
                     return "No agents specified.", True
                 runs = [SubAgentRun(self, a.get("name", f"agent{i}"), a.get("role", "recon"),
@@ -451,11 +519,17 @@ class AgentRun:
                 return "Sub-agents finished:\n\n" + "\n\n".join(out), False
 
             if name == "record_finding":
+                ids=list(dict.fromkeys(int(i) for i in args.get('evidence_ids',[])))
+                if not ids or len(ids)>20: return 'Link 1–20 proof request IDs.',True
+                async with SessionLocal() as session:
+                    for rid in ids:
+                        req=await session.get(RepeaterRequest,rid)
+                        if not req or req.task_id!=self.task_id: return 'Evidence not in scan.',True
                 rel = await intel.classify_finding(args["title"], args.get("summary", ""), exclude_task_id=self.task_id)
                 async with SessionLocal() as s:
                     f = Finding(task_id=self.task_id, title=args["title"], severity=args.get("severity", "info"),
                                 summary=args.get("summary", ""), report_md=args.get("report_md", ""),
-                                relation=rel["relation"], related_to=rel["related_to"])
+                                relation=rel["relation"], related_to=rel["related_to"],evidence_ids=json.dumps(ids))
                     s.add(f)
                     await s.commit()
                     await s.refresh(f)
@@ -474,7 +548,9 @@ class AgentRun:
                 await notify.push(lvl, f"Finding: {args['title']}",
                                   f"severity={args.get('severity')} · relation={rel['relation']}", self.task_id)
                 # Auto-verify then deliver to Telegram (non-blocking).
-                asyncio.create_task(self._verify_and_notify(fid))
+                background=asyncio.create_task(self._verify_and_notify(fid))
+                self.background.add(background)
+                background.add_done_callback(self.background.discard)
                 extra = ""
                 if rel["relation"] == "same":
                     extra = " NOTE: likely DUPLICATE of an earlier finding."
@@ -517,12 +593,20 @@ class AgentRun:
         cfg = await settings_store.llm_config()
         async with SessionLocal() as s:
             task = await s.get(Task, self.task_id)
+            if not task or task.status!='queued': return
             program_id = task.program_id
             self.program_id = program_id
             program = await s.get(Program, task.program_id) if task.program_id else None
             self.target = task.target
             objective = task.objective
             self.scope_in, self.scope_out = load_scope(program)
+            if not program: self.scope_in=[knowledge.host_of(task.target)]
+            self.browser.scope_in,self.browser.scope_out=self.scope_in,self.scope_out
+            self.policy=program.policy if program else ''
+            self.effort=task.effort or None
+            self.cost,self.steps=task.cost_usd,task.steps
+            saved=json.loads(task.checkpoint or '{}')
+            task.finished_at=None
             provider = task.provider or cfg["provider"]
             model = task.model or cfg["model"]
             task.status = "running"
@@ -531,6 +615,9 @@ class AgentRun:
             await s.commit()
         self._provider_name = provider
         self._model_name = model
+        self.subagent_cap=int(await settings_store.get('max_subagents','4'))
+        self.subagent_semaphore=asyncio.Semaphore(max(1,self.subagent_cap))
+        self.max_steps=int(await settings_store.get('max_steps_per_task','200'))
         try:
             self.budget_usd = float(await settings_store.get("budget_usd_per_task", "0") or 0)
         except ValueError:
@@ -572,7 +659,7 @@ class AgentRun:
         try:
             # Build the system prompt with loaded skills + recalled memory for this target.
             host = knowledge.host_of(self.target)
-            system = SYSTEM_PROMPT
+            system = SYSTEM_PROMPT + '\\nPROGRAM POLICY:\\n' + (self.policy or '')
             skills_ctx = await knowledge.skills_context()
             if skills_ctx:
                 system += "\n\n=== LOADED SKILLS ===\n" + skills_ctx
@@ -582,10 +669,13 @@ class AgentRun:
                 kickoff = mem_ctx + "\n\n" + kickoff
 
             # Workspace shell tools are opt-in (they run commands on the host machine).
-            tools = list(TOOLS)
+            from ..mcp_client import Manager
+            self.mcp=Manager()
+            await self.mcp.connect(await settings_store.get_all())
+            tools=list(TOOLS)+[t for t in WORKSPACE_TOOLS if t['name']!='run_command']+self.mcp.tools
             if (await settings_store.get("enable_shell", "false")) == "true":
                 from .. import recon_tools
-                tools = tools + WORKSPACE_TOOLS
+                tools += [t for t in WORKSPACE_TOOLS if t['name']=='run_command']
                 installed = recon_tools.installed_names()
                 system += ("\n\nYou have a per-scan WORKSPACE: use write_file to save custom probing "
                            "scripts and run_command to execute them in that directory. "
@@ -599,8 +689,13 @@ class AgentRun:
                 max_passes = int(await settings_store.get("max_passes", "3"))
             except ValueError:
                 max_passes = 3
+            initial_messages=saved.get('messages') if saved.get('provider')==provider and saved.get('model')==model else None
+            if not initial_messages:
+                kickoff+='\\nPersisted open work:\\n'+'\\n'.join(await self._open_work())
             passes = 0
             while True:
+                if (self.budget_usd and self.cost>=self.budget_usd) or (self.max_steps and self.steps>=self.max_steps):
+                    self.stop_reason='budget or step limit';self.stop.set();break
                 final_text = await llm.agent_loop(
                     system=system,
                     kickoff=kickoff,
@@ -608,7 +703,9 @@ class AgentRun:
                     should_stop=lambda: self.stop.is_set(), max_iterations=cfg["max_iterations"],
                     on_usage=self._on_usage, inbox=self._drain_inbox,
                     get_effort=lambda: self.effort or cfg["effort"],
+                    initial_messages=initial_messages,on_checkpoint=self._checkpoint,
                 )
+                initial_messages=None
                 passes += 1
                 if self.stop.is_set() or passes >= max_passes:
                     break
@@ -622,17 +719,22 @@ class AgentRun:
                 kickoff = ("Continue the assessment. You still have UNFINISHED work — do NOT conclude "
                            "while these remain. For each, either confirm it, disprove it, or record why "
                            "it's parked, then go deeper:\n- " + "\n- ".join(open_work[:25]))
-            status = "stopped" if self.stop.is_set() else "done"
+            if not self.stop.is_set() and await self._open_work(): self.stop_reason='open work remains'
+            status = 'paused' if self.stop_reason else ('stopped' if self.stop.is_set() else 'done')
         except Exception as e:  # noqa: BLE001
             status = "error"
             await bus.emit(self.task_id, "log", f"Run error: {e}", {"error": str(e)})
         finally:
+            if self.background: await asyncio.gather(*list(self.background),return_exceptions=True)
+            if self.mcp: await self.mcp.close()
             await self.browser.close()
             STOP_FLAGS.pop(self.task_id, None)
             INBOX.pop(self.task_id, None)
 
         async with SessionLocal() as s:
             task = await s.get(Task, self.task_id)
+            if not task: return
+            task.stop_reason=self.stop_reason
             task.status = status
             task.finished_at = now()
             await s.commit()
@@ -642,4 +744,16 @@ class AgentRun:
 
 
 async def start_task(task_id: int) -> None:
-    await AgentRun(task_id).run()
+    if task_id in ACTIVE: return
+    ACTIVE[task_id]=asyncio.current_task()
+    run=AgentRun(task_id);RUNS[task_id]=run
+    try:
+        await run.run()
+    except Exception as e:
+        async with SessionLocal() as session:
+            task=await session.get(Task,task_id)
+            if task: task.status='error';task.stop_reason=str(e)[:120];await session.commit()
+    finally:
+        await run.browser.close()
+        ACTIVE.pop(task_id,None);RUNS.pop(task_id,None)
+        STOP_FLAGS.pop(task_id,None);INBOX.pop(task_id,None)

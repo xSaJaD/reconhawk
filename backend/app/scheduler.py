@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import logging
 
 from sqlalchemy import select
 
@@ -17,11 +18,14 @@ async def _tick() -> None:
         due = []
         for r in routines:
             last = r.last_run
+            if last is not None and last.tzinfo is None: last=last.replace(tzinfo=dt.timezone.utc)
             if last is None or (now() - last) >= dt.timedelta(minutes=r.interval_minutes):
                 due.append(r)
         launched = []
         for r in due:
-            t = Task(target=r.target, objective=r.objective, program_id=r.program_id)
+            active=(await s.execute(select(Task).where(Task.routine_id==r.id,Task.status.in_(['queued','running'])))).scalars().first()
+            if active: continue
+            t = Task(target=r.target, objective=r.objective, program_id=r.program_id,routine_id=r.id)
             s.add(t)
             r.last_run = now()
             await s.flush()
@@ -36,7 +40,7 @@ async def _loop() -> None:
         try:
             await _tick()
         except Exception:
-            pass
+            logging.getLogger(__name__).exception('Scheduler failed')
         await asyncio.sleep(60)
 
 
@@ -44,3 +48,11 @@ def start() -> None:
     global _task
     if _task is None:
         _task = asyncio.create_task(_loop())
+
+
+async def stop():
+    global _task
+    if _task:
+        _task.cancel()
+        await asyncio.gather(_task,return_exceptions=True)
+        _task=None

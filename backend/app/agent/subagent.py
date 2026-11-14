@@ -48,7 +48,15 @@ class SubAgentRun:
         await bus.emit(self.parent.task_id, kind, f"[{self.name}] {title}", body)
 
     async def run(self) -> str:
+        async with self.parent.subagent_semaphore:
+            if self.parent.stop.is_set(): return 'Paused'
+            return await self._run()
+
+    async def _run(self) -> str:
         cfg = await settings_store.llm_config()
+        raw=await settings_store.get_all()
+        cfg['worker_provider']=raw.get('worker_provider') or self.parent._provider_name
+        cfg['worker_model']=raw.get('worker_model') or self.parent._model_name
         async with SessionLocal() as s:
             row = SubAgent(task_id=self.parent.task_id, name=self.name, role=self.role, status="working")
             s.add(row)
@@ -62,16 +70,20 @@ class SubAgentRun:
         try:
             # Prefer the cheaper worker model for sub-agents.
             llm = build_llm(cfg, provider=cfg["worker_provider"], model=cfg["worker_model"])
+            allowed={t['name'] for t in _tools_for(self.role)}
+            async def dispatch(name,args):
+                if name not in allowed: return 'Tool not permitted for specialist.',True
+                return await self.parent.dispatch(name,args)
             final = await llm.agent_loop(
-                system=ROLE_SYSTEM,
+                system=ROLE_SYSTEM+'\nPROGRAM POLICY:\n'+getattr(self.parent,'policy',''),
                 kickoff=f"Specialist role: {self.role}\nDelegated task:\n{self.brief}\n\n"
                         f"Target: {self.parent.target}. Work in scope, go deep, report evidence.",
                 tools=_tools_for(self.role),
-                dispatch=self.parent.dispatch,          # SAME dispatch → same scope guard + task rows
+                dispatch=dispatch,          # SAME dispatch → same scope guard + task rows
                 emit=self._emit,
                 should_stop=lambda: self.parent.stop.is_set(),
                 max_iterations=int(await settings_store.get("subagent_max_iterations", "14")),
-                on_usage=self.parent._on_usage,         # tokens/cost roll up → budget stop still fires
+                on_usage=lambda tin,tout:self.parent._on_usage(tin,tout,cfg['worker_provider'],cfg['worker_model']),         # tokens/cost roll up → budget stop still fires
                 get_effort=lambda: self.parent.effort or cfg["effort"],
             )
         except Exception as e:  # noqa: BLE001

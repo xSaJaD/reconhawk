@@ -9,9 +9,15 @@ import {
   ProgramIcon, TypeBadge, ProgramDetailModal,
 } from "./panels";
 
+import {Access,Specs,Tools} from './extra';
 function ts(s?: string) { try { return s ? new Date(s).toLocaleTimeString() : ""; } catch { return ""; } }
 
 export default function Page() {
+  const [tab,setTab]=useState('Overview');
+  const [login,setLogin]=useState(false);
+  const [error,setError]=useState('');
+  useEffect(()=>{const handler=()=>setLogin(true);window.addEventListener('reconhawk-auth',handler);return()=>window.removeEventListener('reconhawk-auth',handler);},[]);
+  const act=async(fn:()=>Promise<any>)=>{try{setError('');await fn();}catch(e:any){setError(e.message);}};
   const [health, setHealth] = useState<any>(null);
   const [view, setView] = useState("console");
   const [tasks, setTasks] = useState<any[]>([]);
@@ -68,13 +74,13 @@ export default function Page() {
   }, [refreshTasks, refreshPrograms, refreshNotifs]);
 
   useEffect(() => {
-    let ws: WebSocket; let retry: any;
+    let ws: WebSocket; let retry: any; let disposed=false;
     const connect = () => {
       ws = new WebSocket(WS_URL);
       ws.onopen = () => setWsOn(true);
-      ws.onclose = () => { setWsOn(false); retry = setTimeout(connect, 2000); };
+      ws.onclose = () => { setWsOn(false); if(!disposed) retry = setTimeout(connect, 2000); };
       ws.onmessage = (m) => {
-        const ev = JSON.parse(m.data);
+        let ev:any;try{ev=JSON.parse(m.data);}catch{return;}
         if (ev.kind === "notification") { refreshNotifs(); return; }
         if (ev.kind === "status") refreshTasks();
         if (ev.task_id !== selRef.current) return;
@@ -83,7 +89,7 @@ export default function Page() {
         else if (ev.kind === "idea") setIdeas((p) => [...p, ev]);
         else if (ev.kind === "endpoint") setEndpoints((p) => [{ id: Math.random(), ...body }, ...p]);
         else if (ev.kind === "lead") setLeads((p) => [{ id: Math.random(), title: ev.title, ...body }, ...p]);
-        else if (ev.kind === "subagent") setSubagents((p) => [{ id: Math.random(), ...body }, ...p]);
+        else if (ev.kind === "subagent") api.subagents(ev.task_id).then(setSubagents).catch(()=>{});
         else if (ev.kind === "intel") setIntel((p) => [{ id: Math.random(), ...body }, ...p]);
         else if (ev.kind === "finding") api.findings(ev.task_id).then(setFindings).catch(() => {});
         else if (ev.kind === "repeater") api.repeater(ev.task_id).then(setRepeater).catch(() => {});
@@ -91,8 +97,8 @@ export default function Page() {
       };
     };
     connect();
-    return () => { clearTimeout(retry); ws && ws.close(); };
-  }, [refreshTasks, refreshNotifs]);
+    return () => { disposed=true; clearTimeout(retry); ws && ws.close(); };
+  }, [refreshTasks, refreshNotifs, login]);
 
   const syncH1 = async () => {
     setH1Msg("syncing HackerOne…");
@@ -118,7 +124,7 @@ export default function Page() {
   return (
     <>
       <div className="topbar">
-        <div className="logo">Recon<span>Hawk</span> <span style={{ fontSize: 10, color: "var(--muted)", fontWeight: 400 }}>v1.6</span></div>
+        <div className="logo">Recon<span>Hawk</span> <span style={{ fontSize: 10, color: "var(--muted)", fontWeight: 400 }}>v1.7</span></div>
         {navBtn("console", "Console")}
         {navBtn("knowledge", "Knowledge")}
         {navBtn("routines", "Routines")}
@@ -233,96 +239,35 @@ export default function Page() {
                 </div>
                 <div className="row">
                   <span className={"badge " + current.status}>{current.status}</span>
-                  {current.status === "running" && <button className="danger" onClick={() => api.stopTask(current.id)}>Stop</button>}
+                  {current.status==='running'&&<><button onClick={()=>act(()=>api.setEffort(current.id,'max'))}>Deep hunt</button><button className="danger" onClick={()=>act(()=>api.stopTask(current.id))}>Stop</button></>}
+{!['running','queued'].includes(current.status)&&<button onClick={()=>act(async()=>{await api.resumeTask(current.id);await refreshTasks();})}>Resume</button>}
                 </div>
               </div>
 
-              <OverviewStrip taskId={current.id} refreshKey={timeline.length} />
 
-              <div className="grid grid3">
-                <Panel title="Plan">
-                  {plan.length === 0 ? <div className="empty">No plan yet.</div> :
-                    plan.map((s, i) => <div key={i} className="plan-step"><span className="muted">{i + 1}.</span> {s}</div>)}
-                </Panel>
-                <IdeasQueue taskId={current.id} refreshKey={timeline.length} />
-                <Panel title={`Sub-agents (${subagents.length})`}>
-                  {subagents.length === 0 ? <div className="empty">—</div> :
-                    subagents.map((a, i) => (
-                      <div key={a.id ?? i} className="plan-step">
-                        <strong>{a.name}</strong> <span className="muted">· {a.role}</span>
-                        {a.summary && <div className="muted" style={{ fontSize: 12 }}>{a.summary}</div>}
-                      </div>
-                    ))}
-                </Panel>
+              <div role="tablist" className="session-tabs">{['Overview','Conversation','Assets','Findings','Reports','Activity','Health','Files','Tools','Repeater'].map(name=><button role="tab" aria-selected={tab===name} className={tab===name?'primary':''} key={name} onClick={()=>setTab(name)}>{name}</button>)}</div>
+              {error&&<p role="alert">{error}</p>}
+              <div role="tabpanel" key={current.id+'-'+tab}>
+              {tab==='Overview'&&<><OverviewStrip taskId={current.id} refreshKey={timeline.length}/><div className="grid grid3">
+                <Panel title="Plan">{plan.map((x,i)=><p key={i}>{i+1}. {x}</p>)}</Panel>
+                <IdeasQueue taskId={current.id} refreshKey={timeline.length}/>
+                <Panel title="Specialists">{subagents.map(x=><p key={x.id}>{x.name} · {x.status} · {x.summary}</p>)}</Panel>
+                <Panel title="Leads">{leads.map(x=><p key={x.id}>#{x.id} {x.title} · {x.status}</p>)}</Panel></div></>}
+              {tab==='Conversation'&&<><Panel title="Agent conversation">{timeline.filter(e=>parseBody(e.body)?.text).map((e,i)=><pre key={i}>{parseBody(e.body).text}</pre>)}</Panel><ConversationBox taskId={current.id} running={current.status==='running'}/></>}
+              {tab==='Assets'&&<><div className="grid"><AssetsPanel taskId={current.id} refreshKey={timeline.length}/><GraphPanel taskId={current.id} refreshKey={timeline.length}/></div><Panel title="Endpoints">{endpoints.map(x=><p key={x.id}>{x.method} {x.url}</p>)}</Panel><Specs taskId={current.id}/></>}
+              {['Findings','Reports'].includes(tab)&&<Panel title={tab}>{findings.filter(f=>tab!=='Reports'||f.report_md).map(f=><FindingCard key={f.id} f={f} onChange={()=>api.findings(current.id).then(setFindings)}/>)}</Panel>}
+              {tab==='Activity'&&<Panel title="Activity">{timeline.slice().reverse().map((e,i)=><div className="timeline-item" key={i}><span className="kind-tag">{e.kind}</span>{e.title||parseBody(e.body)?.text}<div className="ts">{ts(e.created_at)}</div></div>)}</Panel>}
+              {tab==='Health'&&<HealthPanel taskId={current.id} refreshKey={timeline.length}/>}
+              {tab==='Files'&&<WorkspacePanel taskId={current.id} refreshKey={timeline.length}/>}
+              {tab==='Tools'&&<Tools/>}
+              {tab==='Repeater'&&<RepeaterPanel taskId={current.id} history={repeater} onSent={(x:any)=>setRepeater(p=>[x,...p])}/>}
               </div>
-
-              <div className="grid grid3" style={{ marginTop: 14 }}>
-                <Panel title={`Endpoints (${endpoints.length})`}>
-                  {endpoints.length === 0 ? <div className="empty">—</div> :
-                    endpoints.map((e, i) => (
-                      <div key={e.id ?? i} className="endpoint">
-                        <span className="method">{e.method || "GET"}</span> {e.url}
-                        {e.source && <span className="muted"> · {e.source}</span>}
-                      </div>
-                    ))}
-                </Panel>
-                <Panel title={`Leads (${leads.length})`}>
-                  {leads.length === 0 ? <div className="empty">—</div> :
-                    leads.map((l, i) => (
-                      <div key={l.id ?? i} className="endpoint">
-                        <span className={"badge sev-" + (l.severity_guess || "info")}>{l.severity_guess}</span> {l.title}
-                        {l.rationale && <div className="muted" style={{ fontSize: 11 }}>{l.rationale}</div>}
-                      </div>
-                    ))}
-                </Panel>
-                <Panel title={`Extracted intel (${intel.length})`}>
-                  {intel.length === 0 ? <div className="empty">—</div> :
-                    intel.map((i, idx) => (
-                      <div key={i.id ?? idx} className="endpoint">
-                        <span className="kind-tag">{i.kind}</span> {i.value}
-                        {i.source && <span className="muted"> · {i.source}</span>}
-                      </div>
-                    ))}
-                </Panel>
-                <Panel title="Live timeline" grow>
-                  {timeline.length === 0 ? <div className="empty">Waiting…</div> :
-                    timeline.slice().reverse().map((e, i) => {
-                      const b = parseBody(e.body);
-                      return (
-                        <div key={i} className="timeline-item">
-                          <span className="kind-tag">{e.kind}</span>
-                          {e.title || (b && b.text) || (b && b.tool) || ""}
-                          {e.kind === "tool_call" && b?.input && <span className="muted mono"> {JSON.stringify(b.input).slice(0, 100)}</span>}
-                          <div className="ts">{ts(e.created_at)}</div>
-                        </div>
-                      );
-                    })}
-                </Panel>
-              </div>
-
-              <div className="grid grid3" style={{ marginTop: 14 }}>
-                <AssetsPanel taskId={current.id} refreshKey={timeline.length} />
-                <HealthPanel taskId={current.id} refreshKey={timeline.length} />
-                <GraphPanel taskId={current.id} refreshKey={timeline.length} />
-              </div>
-
-              <ConversationBox taskId={current.id} running={current.status === "running"} />
-
-              <div className="panel" style={{ marginTop: 14, maxHeight: "none" }}>
-                <h3>Reports / Findings ({findings.length})</h3>
-                <div className="body">
-                  {findings.length === 0 ? <div className="empty">No findings recorded.</div> :
-                    findings.map((f) => <FindingCard key={f.id} f={f} onChange={() => api.findings(current.id).then(setFindings)} />)}
-                </div>
-              </div>
-
-              <WorkspacePanel taskId={current.id} refreshKey={timeline.length} />
-              <RepeaterPanel taskId={current.id} history={repeater} onSent={(r: any) => setRepeater((p) => [r, ...p])} />
             </>
           )}
         </div>
       </div>
 
+      {login&&<Access done={()=>{setLogin(false);refreshTasks();refreshPrograms();refreshNotifs();api.health().then(setHealth);}}/>}
       {showTask && <NewTaskModal programs={programs} onClose={() => setShowTask(false)}
         onCreated={async (t: any) => { setShowTask(false); await refreshTasks(); loadTask(t.id); }} />}
       {showProg && <NewProgramModal onClose={() => setShowProg(false)}

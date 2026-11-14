@@ -7,9 +7,9 @@ import os
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import Request, Response, FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import select, desc, update, func
 
@@ -20,6 +20,7 @@ from .db import (
 )
 from .events import bus
 from .scope import check_url, load_scope, ScopeError
+from .guard import policy
 from .agent.runner import start_task, request_stop
 from .tools import http_client
 from .llm import PROVIDERS, build_llm
@@ -33,13 +34,51 @@ async def lifespan(app: FastAPI):
     os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
     await init_db()
     await skills_seed.seed_skills()
+    settings.scope_enforced=(await settings_store.get('scope_enforced'))=='true'
+    async with SessionLocal() as session:
+        await session.execute(update(Task).where(Task.status.in_(['running','queued'])).values(status='paused',stop_reason='service restarted'))
+        await session.commit()
     scheduler.start()
     telegram_bot.start()
-    yield
+    try:
+        yield
+    finally:
+        await scheduler.stop()
+        from .agent.runner import ACTIVE
+        workers=list(ACTIVE.values())
+        for tid in list(ACTIVE): request_stop(tid)
+        if workers:
+            done,pending=await asyncio.wait(workers,timeout=10)
+            for t in pending: t.cancel()
+            await asyncio.gather(*pending,return_exceptions=True)
 
 
-app = FastAPI(title="ReconHawk API", version="0.3.0", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app = FastAPI(title="ReconHawk API", version="1.7.0", lifespan=lifespan)
+@app.middleware('http')
+async def authenticate(request:Request,call_next):
+    from .auth import allowed,origin_ok
+    if request.method=='OPTIONS' or (request.url.path=='/api/session' and request.method=='POST' and origin_ok(request)):
+        return await call_next(request)
+    if not allowed(request): return JSONResponse({'detail':'Authentication required'},status_code=401)
+    return await call_next(request)
+
+app.add_middleware(CORSMiddleware,allow_origins=settings.cors_origins.split(','),allow_credentials=True,allow_methods=['GET','POST','PUT','DELETE'],allow_headers=['Content-Type','Authorization'])
+
+@app.exception_handler(ValueError)
+async def invalid_value(request,exc):
+    return JSONResponse({'detail':str(exc)},status_code=400)
+
+@app.post('/api/session')
+async def login(body:dict,request:Request,response:Response):
+    import hmac
+    if not settings.api_token or not hmac.compare_digest(str(body.get('token','')),settings.api_token): raise HTTPException(401)
+    response.set_cookie('reconhawk_session',settings.api_token,httponly=True,samesite='strict',secure=request.url.scheme=='https',max_age=43200)
+    return {'ok':True}
+
+@app.delete('/api/session')
+async def logout(response:Response):
+    response.delete_cookie('reconhawk_session')
+    return {'ok':True}
 
 
 # ---------- schemas ----------
@@ -60,6 +99,7 @@ class TaskIn(BaseModel):
     program_id: int | None = None
     provider: str | None = None
     model: str | None = None
+    effort: str = ''
 
 
 class RepeaterIn(BaseModel):
@@ -324,6 +364,7 @@ async def list_tasks():
 async def create_task(body: TaskIn):
     async with SessionLocal() as s:
         program = await s.get(Program, body.program_id) if body.program_id else None
+        if body.program_id and not program: raise HTTPException(404,"Program not found")
         si, so = load_scope(program)
         try:
             check_url(body.target, si, so)
@@ -335,7 +376,7 @@ async def create_task(body: TaskIn):
                                 detail=f"No API key set for provider '{prov}'. "
                                        "Open ⚙ Settings, add a key, and Test connection.")
         t = Task(target=body.target, objective=body.objective, program_id=body.program_id,
-                 provider=body.provider or "", model=body.model or "")
+                 provider=body.provider or "", model=body.model or "", effort=body.effort)
         s.add(t)
         await s.commit()
         await s.refresh(t)
@@ -364,14 +405,16 @@ async def stop_task(tid: int):
 async def delete_task(tid: int):
     """Delete a task and all its child rows (stops it first if running)."""
     request_stop(tid)
+    from .agent.runner import ACTIVE
+    if tid in ACTIVE: raise HTTPException(409,'Scan is stopping; retry after it stops')
     from sqlalchemy import delete as sqldelete
-    from .db import (Idea, GraphNode, GraphEdge, Asset, TokenUsage, Memory)
+    from .db import (Idea, GraphNode, GraphEdge, Asset, TokenUsage, Memory, EndpointSpec)
     async with SessionLocal() as s:
         t = await s.get(Task, tid)
         if not t:
             raise HTTPException(404)
         for model in (Event, Endpoint, Finding, Lead, SubAgent, RepeaterRequest, Intel,
-                      Idea, GraphNode, GraphEdge, Asset, TokenUsage):
+                      Idea, GraphNode, GraphEdge, Asset, TokenUsage, EndpointSpec):
             await s.execute(sqldelete(model).where(model.task_id == tid))
         # addenda reference findings of this task — clear by task_id too
         await s.execute(sqldelete(Addendum).where(Addendum.task_id == tid))
@@ -387,7 +430,8 @@ async def task_events(tid: int, kind: str | None = None, limit: int = 1000):
         q = select(Event).where(Event.task_id == tid)
         if kind:
             q = q.where(Event.kind == kind)
-        rows = (await s.execute(q.order_by(Event.id).limit(limit))).scalars().all()
+        rows = (await s.execute(q.order_by(desc(Event.id)).limit(max(1,min(limit,5000))))).scalars().all()
+        rows=list(reversed(rows))
         return [{"id": e.id, "kind": e.kind, "title": e.title, "body": e.body,
                  "created_at": e.created_at.isoformat()} for e in rows]
 
@@ -426,7 +470,7 @@ async def task_findings(tid: int):
 def _finding_dict(f: Finding) -> dict:
     return {"id": f.id, "task_id": f.task_id, "title": f.title, "severity": f.severity, "status": f.status,
             "summary": f.summary, "report_md": f.report_md, "relation": f.relation,
-            "related_to": f.related_to, "confidence": f.confidence, "verified": f.verified,
+            "related_to": f.related_to, "evidence_ids": json.loads(f.evidence_ids or "[]"), "confidence": f.confidence, "verified": f.verified,
             "evidence_score": f.evidence_score, "verdict": f.verdict, "weakness": f.weakness,
             "h1_report_id": f.h1_report_id,
             "h1_report_url": f.h1_report_url,
@@ -551,13 +595,17 @@ async def repeater_send(body: RepeaterIn):
     if body.task_id:
         async with SessionLocal() as s:
             t = await s.get(Task, body.task_id)
-            program = await s.get(Program, t.program_id) if t and t.program_id else None
+            if not t: raise HTTPException(404)
+            program = await s.get(Program, t.program_id) if t.program_id else None
             si, so = load_scope(program)
     try:
         check_url(body.url, si, so)
     except ScopeError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    res = await http_client.send_request(body.method, body.url, headers=body.headers, body=body.body)
+    token=policy.set((si,so))
+    try:
+        res = await http_client.send_request(body.method, body.url, headers=body.headers, body=body.body)
+    finally: policy.reset(token)
     async with SessionLocal() as s:
         rr = RepeaterRequest(task_id=body.task_id, method=body.method.upper(), url=body.url,
                              request_headers=json.dumps(body.headers), request_body=body.body,
@@ -740,7 +788,7 @@ async def task_overview(tid: int):
         "pending_addenda": pending_add,
         "files": len(files),
         "cost": {"tokens_in": t.tokens_in or 0, "tokens_out": t.tokens_out or 0,
-                 "usd": round(t.cost_usd or 0, 4), "steps": t.steps or 0, "budget_usd": budget},
+                 "price_unknown": t.unknown_price, "usd": round(t.cost_usd or 0, 6), "steps": t.steps or 0, "budget_usd": budget},
     }
 
 
@@ -1073,15 +1121,20 @@ async def edit_addendum(aid: int, body: dict):
 # ---------- live stream ----------
 @app.websocket("/ws")
 async def ws(websocket: WebSocket):
+    from .auth import allowed
+    if not allowed(websocket): await websocket.close(code=1008);return
     await websocket.accept()
     q = bus.subscribe()
+    async def send():
+        while True: await websocket.send_json(await q.get())
+    async def receive():
+        while True: await websocket.receive_text()
+    tasks=[asyncio.create_task(send()),asyncio.create_task(receive())]
     try:
-        while True:
-            payload = await q.get()
-            await websocket.send_text(json.dumps(payload, default=str))
-    except WebSocketDisconnect:
-        pass
+        await asyncio.wait(tasks,return_when=asyncio.FIRST_COMPLETED)
     finally:
+        for task in tasks: task.cancel()
+        await asyncio.gather(*tasks,return_exceptions=True)
         bus.unsubscribe(q)
 
 
@@ -1102,5 +1155,68 @@ async def health():
             "has_key": await settings_store.provider_has_key(cfg["provider"]),
             "scope_enforced": settings.scope_enforced,
             "shell": shell_on,
-            "tools": recon_tools.detect()["installed_count"],
+            "tools": len(__import__("app.agent.tools",fromlist=["TOOLS"]).TOOLS)+2+int(shell_on),
             "skills": skills or 0}
+
+@app.post('/api/tasks/{tid}/resume')
+async def resume(tid:int):
+    from .agent.runner import ACTIVE
+    if tid in ACTIVE: raise HTTPException(409,'Already active')
+    async with SessionLocal() as session:
+        t=await session.get(Task,tid)
+        if not t: raise HTTPException(404)
+        if t.status in ('queued','running'): raise HTTPException(409)
+        p=await session.get(Program,t.program_id) if t.program_id else None
+        check_url(t.target,*load_scope(p))
+        result=await session.execute(update(Task).where(Task.id==tid,Task.status==t.status).values(status='queued',finished_at=None,stop_reason=''))
+        if result.rowcount!=1: raise HTTPException(409)
+        await session.commit()
+    asyncio.create_task(start_task(tid))
+    return {'ok':True}
+
+@app.post('/api/tasks/{tid}/effort')
+async def effort(tid:int,body:dict):
+    from .agent.runner import RUNS
+    value=body.get('effort','high')
+    if value not in ('low','medium','high','xhigh','max'): raise HTTPException(400)
+    async with SessionLocal() as session:
+        t=await session.get(Task,tid)
+        if not t: raise HTTPException(404)
+        t.effort=value;await session.commit()
+    if tid in RUNS: RUNS[tid].effort=value
+    return {'ok':True}
+
+@app.get('/api/tasks/{tid}/specs')
+async def specs(tid:int):
+    from .db import EndpointSpec
+    async with SessionLocal() as session:
+        rows=(await session.execute(select(EndpointSpec).where(EndpointSpec.task_id==tid))).scalars().all()
+    return [{'id':r.id,'url':r.url,'method':r.method,'shape':json.loads(r.shape)} for r in rows]
+
+@app.put('/api/findings/{fid}/evidence')
+async def link_evidence(fid:int,body:dict):
+    async with SessionLocal() as session:
+        f=await session.get(Finding,fid)
+        if not f: raise HTTPException(404)
+        ids=list(dict.fromkeys(int(i) for i in body.get('evidence_ids',[])))
+        if len(ids)>20: raise HTTPException(400)
+        for rid in ids:
+            r=await session.get(RepeaterRequest,rid)
+            if not r or r.task_id!=f.task_id: raise HTTPException(400,'Evidence must belong to this scan')
+        f.evidence_ids=json.dumps(ids);f.verified=False;f.confidence=0;f.evidence_score=0
+        await session.commit()
+    return {'ok':True}
+
+@app.get('/api/mcp/servers')
+async def mcp_status():
+    from .mcp_client import STATUS
+    return STATUS
+
+@app.post('/api/mcp/test')
+async def mcp_test():
+    from .mcp_client import Manager
+    manager=Manager()
+    try:
+        await manager.connect(await settings_store.get_all())
+        return {'tools':manager.tools}
+    finally: await manager.close()

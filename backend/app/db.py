@@ -57,6 +57,11 @@ class Task(Base):
     tokens_out: Mapped[int] = mapped_column(Integer, default=0)
     cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
     steps: Mapped[int] = mapped_column(Integer, default=0)
+    checkpoint: Mapped[str] = mapped_column(Text, default='')
+    effort: Mapped[str] = mapped_column(String(20), default='')
+    stop_reason: Mapped[str] = mapped_column(String(120), default='')
+    routine_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    unknown_price: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=now)
     finished_at: Mapped[Optional[dt.datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
@@ -82,6 +87,16 @@ class Endpoint(Base):
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
+class EndpointSpec(Base):
+    __tablename__ = 'endpoint_specs'
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey('tasks.id'), index=True)
+    url: Mapped[str] = mapped_column(Text)
+    method: Mapped[str] = mapped_column(String(20), default='GET')
+    source: Mapped[str] = mapped_column(Text, default='')
+    shape: Mapped[str] = mapped_column(Text, default='{}')
+
+
 class Finding(Base):
     __tablename__ = "findings"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -94,6 +109,7 @@ class Finding(Base):
     # diff intelligence: relation to a prior finding
     relation: Mapped[str] = mapped_column(String(20), default="")  # same|new|regressed|bypass
     related_to: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    evidence_ids: Mapped[str] = mapped_column(Text, default='[]')
     evidence_score: Mapped[int] = mapped_column(Integer, default=0)  # 0-100 evidence quality
     # verification + reporting
     confidence: Mapped[int] = mapped_column(Integer, default=0)  # 0-100
@@ -236,6 +252,7 @@ class TokenUsage(Base):
     model: Mapped[str] = mapped_column(String(100), default="")
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cost_usd: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
@@ -329,6 +346,9 @@ def _column_ddl(col) -> str:
         default = "0"
     else:
         default = "''"
+    if col.default is not None and col.default.is_scalar:
+        value = col.default.arg
+        default = str(int(value)) if isinstance(value,bool) else (str(value) if isinstance(value,(int,float)) else "'" + str(value).replace("'","''") + "'")
     return f"{sqlite_type} DEFAULT {default}"
 
 
