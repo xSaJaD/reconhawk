@@ -864,7 +864,8 @@ async def list_skills():
                  "tags": sk.tags, "source": sk.source} for sk in rows]
 
 
-@app.put("/api/skills/{name}/toggle")
+@app.post("/api/skills/toggle")
+@app.put("/api/skills/{name:path}/toggle")
 async def toggle_skill(name: str):
     async with SessionLocal() as s:
         sk = await s.get(Skill, name)
@@ -960,7 +961,8 @@ async def upload_skills(body: dict):
     return {"added": added, "replaced": replaced, "skipped": skipped, "names": names}
 
 
-@app.put("/api/skills/{name}")
+@app.put("/api/skills")
+@app.put("/api/skills/{name:path}")
 async def edit_skill(name: str, body: dict):
     async with SessionLocal() as s:
         sk = await s.get(Skill, name)
@@ -978,7 +980,8 @@ async def edit_skill(name: str, body: dict):
         return {"name": sk.name, "ok": True}
 
 
-@app.delete("/api/skills/{name}")
+@app.delete("/api/skills")
+@app.delete("/api/skills/{name:path}")
 async def delete_skill(name: str):
     async with SessionLocal() as s:
         sk = await s.get(Skill, name)
