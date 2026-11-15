@@ -26,11 +26,17 @@ CONFIRMATION & REPORTING (the whole point):
 
 IDOR / BOLA METHODOLOGY (High/Critical access-control bugs):
 - Identify object identifiers (ids, uuids, user/account references) in endpoints and JS.
-- AUTHENTICATED testing: call `list_identities`. With two identities (userA, userB), capture a
-  request as userA with `http_request_as`, then `replay_as` that request as userB. If userB reads
-  userA's object, that's proven BOLA. If no identities exist and the program permits test accounts
-  AND the operator enabled provisioning, you may `register_test_account` (it stops at any
-  CAPTCHA/OTP — never bypass it; hand such cases to the operator).
+- AUTHENTICATED testing is where the real bugs are. Call `list_identities` first.
+  - If two identities exist: capture a request as userA with `http_request_as`, then `replay_as`
+    that request as userB. If userB reads/modifies userA's object, that's proven BOLA.
+  - If identities are missing AND provisioning is enabled (see the AUTHENTICATED TESTING banner):
+    do not give up — derive the signup schema from the registration page/JS and
+    `register_test_account` TWICE (userA, userB), then run the differential above. A second,
+    self-owned account is what makes a *safe* cross-account test possible.
+  - `register_test_account` STOPS at any CAPTCHA / OTP / email-or-phone verification and never
+    bypasses it; hand those cases to the operator to create manually.
+  - Reuse the two identities for every account-dependent class: access control, authenticated API
+    logic, session/token handling, and mass-assignment.
 - Prove authorization is missing by accessing exactly ONE adjacent object you shouldn't be
   able to reach, and show the response proves cross-user/cross-tenant access.
 - REDACT any real personal data in your evidence (emails, names, tokens → `[REDACTED]`).
@@ -80,6 +86,37 @@ GOING DEEP (this is what separates a real finding from a shallow pass):
 When the surface is genuinely, deeply covered and open leads are resolved, give a short final summary.
 
 Be concise in your text. Let the tools and records carry the detail."""
+
+
+def auth_testing_directive(provisioning_enabled: bool, cap: str = "2") -> str:
+    """Tell the agent how to obtain the two identities IDOR/BOLA testing needs.
+
+    Guards are unconditional and restated here: operator opt-in, a hard cap, scope checks,
+    and a HARD STOP on any CAPTCHA/OTP/verification — human verification is never bypassed.
+    """
+    if provisioning_enabled:
+        return (
+            "\n\n=== AUTHENTICATED TESTING IS ENABLED ===\n"
+            f"The operator confirmed this program permits test accounts (cap {cap}). If "
+            "`list_identities` is empty, do NOT conclude the authenticated surface is untestable. "
+            "Early (MAP phase), from the registration page and its JS, work out the real signup "
+            "endpoint and its exact field schema, then provision TWO accounts with "
+            "`register_test_account` (labels userA and userB) — a second, self-owned account is "
+            "what makes a safe cross-account test possible. If signup needs a CAPTCHA / OTP / "
+            "email-or-phone verification, STOP and ask the operator to add the identities manually; "
+            "never attempt to bypass human verification. With two identities, immediately run the "
+            "IDOR/BOLA differential: capture a request as userA with `http_request_as`, `replay_as` "
+            "userB, and report any cross-account access (ONE adjacent object, PII redacted). Also "
+            "reuse the two identities for access-control, authenticated API logic, and session tests."
+        )
+    return (
+        "\n\n=== AUTHENTICATED TESTING IS OFF ===\n"
+        "No test identities exist and account provisioning is disabled, so you can only assess "
+        "the UNAUTHENTICATED surface. The high-impact classes (IDOR/BOLA, privilege escalation, "
+        "authenticated API logic) cannot be exercised without accounts. Before you conclude, "
+        "state this limitation plainly to the operator and tell them to either add two identities "
+        "manually or enable test-account provisioning in Settings (only if the program permits it)."
+    )
 
 
 def task_kickoff(target: str, objective: str, scope_in, scope_out) -> str:
