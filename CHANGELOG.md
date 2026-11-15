@@ -22,6 +22,8 @@
 - Includes prior Claude-branch additions: concurrent/stale-scope sync, program search,
   27 refreshed built-ins, persistent skill deletion and skill editing; skill URL-name
   routing is fixed. Existing saved settings are preserved.
+- Internal skill-deletion records no longer leak into provider Settings and break
+  Save with an unknown-setting error after deleting a built-in.
 
 # ReconHawk 1.7.1
 

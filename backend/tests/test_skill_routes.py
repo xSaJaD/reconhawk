@@ -85,3 +85,17 @@ class SkillRouteTests(unittest.IsolatedAsyncioTestCase):
         response = await self.http.delete('/api/skills', params={'name': 'Missing / Skill'})
         self.assertEqual(response.status_code, 404)
         self.assertEqual(len((await self.http.get('/api/skills')).json()), 1)
+
+    async def test_deleting_builtin_does_not_break_settings_save(self):
+        from unittest.mock import patch
+        await skills_seed.seed_skills()
+        name=skills_seed.DEFAULT_SKILLS[0][0]
+        self.assertEqual((await self.http.delete('/api/skills',params={'name':name})).status_code,200)
+        with patch.object(main.settings_store,'SessionLocal',self.sessions):
+            response=await self.http.get('/api/settings')
+            self.assertNotIn(skills_seed._DELETED_KEY,response.json())
+            saved=await self.http.put('/api/settings',json=response.json())
+            self.assertEqual(saved.status_code,200,saved.text)
+        async with self.sessions() as session:
+            marker=await session.get(Setting,skills_seed._DELETED_KEY)
+            self.assertIn(name,json.loads(marker.value))

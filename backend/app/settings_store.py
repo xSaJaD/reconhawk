@@ -63,7 +63,9 @@ async def get_all(mask: bool = False) -> dict:
     async with SessionLocal() as s:
         rows = (await s.execute(select(Setting))).scalars().all()
         for r in rows:
-            out[r.key] = r.value
+            # Internal records (e.g. deleted built-ins) are not editable settings.
+            if r.key in DEFAULTS:
+                out[r.key] = r.value
     if mask:
         for k in SECRET_KEYS:
             if out.get(k):

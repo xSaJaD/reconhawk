@@ -2,12 +2,13 @@
 
 Base: Claude branch commit `9e05ba4619c2bb1bd51ebb57558b88d1e36f2ba7`.
 
-- **185 backend tests passed.** New regressions cover complete files beyond the old
+- **186 backend tests passed.** New regressions cover complete files beyond the old
   character limit, aliases/local wrappers, sparse webpack module IDs, lexical
   shadowing, conditional/nested body fields, fetchConfig action creators, reducer
   evidence, request variants, safe static inference, scoped task artifacts, JSON
   paging, UTF-8 byte pages, large/inline/indexed maps, missing sources, limits,
   specialist cancellation/iteration stops, full reports and read-only JS roles.
+  Deleting a built-in also preserves its deletion record while allowing Settings Save.
 - **Next.js production build and TypeScript passed.**
 - **Two production Chromium suites passed**, with all API/provider/H1/WebSocket
   destinations mocked: the previous provider/program/scope checks, plus analysis
