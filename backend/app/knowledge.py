@@ -106,7 +106,11 @@ async def skills_context() -> str:
         return ""
     lines = ["You have the following loaded testing playbooks. Apply them where relevant:"]
     for sk in skills:
-        lines.append(f"\n### {sk.name} ({sk.category})\n{sk.playbook}\n{sk.payloads_json}\n{sk.bypass_table_md}\n{sk.references_md}")
+        parts = [f"\n### {sk.name} ({sk.category})", sk.playbook]
+        for extra in (sk.payloads_json, sk.bypass_table_md, sk.references_md):
+            if extra and extra.strip():
+                parts.append(extra.strip())
+        lines.append("\n".join(parts))
     return "\n".join(lines)
 
 
