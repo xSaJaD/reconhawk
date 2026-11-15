@@ -86,6 +86,7 @@ export const api = {
   instruct: (id: number, text: string) => j(`/api/tasks/${id}/instruct`, { method: "POST", body: JSON.stringify({ text }) }),
   uploadSkills: (files: any[]) => j("/api/skills/upload", { method: "POST", body: JSON.stringify({ files }) }),
   deleteSkill: (name: string) => j(`/api/skills/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  editSkill: (name: string, body: any) => j(`/api/skills/${encodeURIComponent(name)}`, { method: "PUT", body: JSON.stringify(body) }),
   overview: (id: number) => j(`/api/tasks/${id}/overview`),
   workspace: (id: number) => j(`/api/tasks/${id}/workspace`),
   workspaceFile: (id: number, path: string) => j(`/api/tasks/${id}/workspace/file?path=${encodeURIComponent(path)}`),

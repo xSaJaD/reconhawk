@@ -15,7 +15,7 @@ DEFAULTS = {
     "llm_provider": "anthropic",
     "llm_model": env.agent_model,
     "llm_effort": env.agent_effort,
-    "agent_max_iterations": str(env.agent_max_iterations),
+    "agent_max_iterations": str(max(env.agent_max_iterations, 60)),
     "anthropic_api_key": env.anthropic_api_key,
     "openai_api_key": "",
     "openai_base_url": "https://api.openai.com/v1",
@@ -47,13 +47,13 @@ DEFAULTS = {
     "budget_usd_per_task": "0",
     "max_subagents": "4",
     "subagent_max_iterations": "14",
-    "max_steps_per_task": "200",
+    "max_steps_per_task": "400",
     "enable_mcp": "false",
     "mcp_servers": "[]",
     "accent_color": "#39d98a",
-    "max_passes": "3",  # continuation passes while open leads/ideas remain
+    "max_passes": "5",  # continuation passes while open leads/ideas remain
     # authenticated testing — account provisioning is OFF by default and hard-capped
-    "allow_account_provisioning": "false",
+    "allow_account_provisioning": "true",
     "max_test_accounts": "2",
 }
 

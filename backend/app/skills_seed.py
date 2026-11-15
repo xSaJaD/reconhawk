@@ -1,8 +1,36 @@
 from __future__ import annotations
 
+import json
+
 from sqlalchemy import delete, select
 
-from .db import SessionLocal, Skill
+from .db import SessionLocal, Setting, Skill
+
+# Setting key holding the JSON list of built-in skill names the operator has deleted, so
+# a later restart does not re-create them.
+_DELETED_KEY = "deleted_builtin_skills"
+
+
+async def _deleted_builtins(session) -> set[str]:
+    row = await session.get(Setting, _DELETED_KEY)
+    if row is None:
+        return set()
+    try:
+        value = json.loads(row.value)
+        return set(value) if isinstance(value, list) else set()
+    except (ValueError, TypeError):
+        return set()
+
+
+async def mark_builtin_deleted(session, name: str) -> None:
+    """Record that a built-in was deleted; caller commits."""
+    current = await _deleted_builtins(session)
+    current.add(name)
+    row = await session.get(Setting, _DELETED_KEY)
+    if row is None:
+        session.add(Setting(key=_DELETED_KEY, value=json.dumps(sorted(current))))
+    else:
+        row.value = json.dumps(sorted(current))
 
 # Built-in testing playbooks, one per vulnerability class. Each is consulting guidance
 # for authorized, in-scope bug-bounty testing — a condensed, well-referenced methodology
@@ -336,10 +364,12 @@ async def seed_skills() -> None:
         rows = (await s.execute(select(Skill))).scalars().all()
         by_name = {row.name: row for row in rows}
         custom_names = {row.name for row in rows if row.is_custom or row.source == "custom"}
+        deleted = await _deleted_builtins(s)
 
-        # Upsert the shipped built-ins (never overwrite a custom skill with the same name).
+        # Upsert the shipped built-ins (never overwrite a custom skill with the same name,
+        # and never resurrect a built-in the operator has deleted).
         for name, (cat, summary, playbook, refs, tags) in wanted.items():
-            if name in custom_names:
+            if name in custom_names or (name in deleted and name not in by_name):
                 continue
             row = by_name.get(name)
             if row is None:

@@ -88,3 +88,20 @@ class SkillSeedTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SkillDeletionPersistsTests(SkillSeedTests):
+    async def test_deleted_builtin_is_not_resurrected_on_reseed(self):
+        await skills_seed.seed_skills()
+        # Operator deletes a built-in (mirrors the DELETE route path).
+        async with self.sessions() as s:
+            from app.db import Skill
+            from sqlalchemy import select as _sel
+            row = (await s.execute(_sel(Skill).where(Skill.name.like("JWT%")))).scalars().one()
+            name = row.name
+            await s.delete(row)
+            await skills_seed.mark_builtin_deleted(s, name)
+            await s.commit()
+        await skills_seed.seed_skills()  # restart re-seed must NOT bring it back
+        names = {r.name for r in await self.all_skills()}
+        self.assertNotIn(name, names)

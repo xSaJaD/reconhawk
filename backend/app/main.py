@@ -970,6 +970,10 @@ async def edit_skill(name: str, body: dict):
             sk.playbook = body["playbook"]
         if "summary" in body:
             sk.summary = body["summary"][:300]
+        if "category" in body and isinstance(body["category"], str) and body["category"].strip():
+            sk.category = body["category"].strip()[:60]
+        if "references_md" in body:
+            sk.references_md = body["references_md"]
         await s.commit()
         return {"name": sk.name, "ok": True}
 
@@ -980,9 +984,11 @@ async def delete_skill(name: str):
         sk = await s.get(Skill, name)
         if not sk:
             raise HTTPException(404)
-        if not sk.is_custom:
-            raise HTTPException(400, "Built-in skills can't be deleted (toggle them off instead).")
         await s.delete(sk)
+        # Remember a deleted built-in so startup re-seeding does not resurrect it.
+        if not sk.is_custom:
+            from .skills_seed import mark_builtin_deleted
+            await mark_builtin_deleted(s, name)
         await s.commit()
     return {"ok": True}
 
