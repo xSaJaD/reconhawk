@@ -17,7 +17,7 @@ from ..llm import build_llm
 from ..guard import policy
 from .. import redact
 from ..db import EndpointSpec
-from .prompts import SYSTEM_PROMPT, task_kickoff
+from .prompts import SYSTEM_PROMPT, task_kickoff, auth_testing_directive as prompts_auth_directive
 from .tools import TOOLS, WORKSPACE_TOOLS
 from sqlalchemy import select, desc
 
@@ -663,6 +663,15 @@ class AgentRun:
             skills_ctx = await knowledge.skills_context()
             if skills_ctx:
                 system += "\n\n=== LOADED SKILLS ===\n" + skills_ctx
+
+            # Authenticated testing is where IDOR/BOLA and access-control bugs live. When the
+            # operator has confirmed the program permits test accounts, make the agent provision
+            # the two identities it needs instead of skipping to an unauthenticated-only report.
+            # Every guard stays: operator opt-in, a hard cap, scope checks, and a HARD STOP on any
+            # CAPTCHA/OTP/verification (never bypassed).
+            provisioning_on = (await settings_store.get("allow_account_provisioning", "false")) == "true"
+            system += prompts_auth_directive(
+                provisioning_on, await settings_store.get("max_test_accounts", "2"))
             mem_ctx = await knowledge.memory_context(host, program_id)
             kickoff = task_kickoff(self.target, objective, self.scope_in, self.scope_out)
             if mem_ctx:
