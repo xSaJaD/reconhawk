@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import codecs
 
 from ..config import settings
 
@@ -35,6 +36,31 @@ def read_file(task_id: int, path: str, max_chars: int = 20000) -> str:
         return f"ERROR: no such file: {path}"
     with open(full, "r", encoding="utf-8", errors="replace") as f:
         return f.read()[:max_chars]
+
+
+def read_page(task_id: int, path: str, offset: int = 0, limit: int = 20000) -> dict:
+    """Read a byte-addressed page, matching AST source_range coordinates."""
+    offset, limit = int(offset), int(limit)
+    if offset < 0 or not 1 <= limit <= 100000:
+        raise ValueError('Invalid file page')
+    full = _safe_path(task_id, path)
+    with open(full, 'rb') as file:
+        total = os.fstat(file.fileno()).st_size
+        file.seek(offset)
+        content = file.read(limit)
+        decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
+        text = decoder.decode(content, final=offset + len(content) >= total)
+        pending = decoder.getstate()[0]
+        if pending and offset + len(content) < total:
+            # Finish a split UTF-8 scalar; following pages start on a boundary.
+            extra = file.read(3)
+            content += extra
+            text += decoder.decode(extra, final=offset + len(content) >= total)
+            pending = decoder.getstate()[0]
+        consumed = len(content) - len(pending)
+    end = offset + consumed
+    return {'path': path, 'text': text, 'offset': offset,
+            'units': 'bytes', 'total_bytes': total, 'next_offset': end if end < total else None}
 
 
 async def run_command(task_id: int, command: str, timeout: float = 120.0) -> dict:

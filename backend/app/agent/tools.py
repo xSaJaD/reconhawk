@@ -1,6 +1,6 @@
 """Tool schemas exposed to Claude. Dispatch lives in runner.py."""
 
-# Workspace tools — only added when the enable_shell setting is on.
+# Task-local file tools; only run_command requires enable_shell.
 WORKSPACE_TOOLS = [
     {
         "name": "write_file",
@@ -14,10 +14,11 @@ WORKSPACE_TOOLS = [
     },
     {
         "name": "read_file",
-        "description": "Read a file from your workspace.",
+        "description": "Read a byte-addressed page of a workspace file. Follow next_offset to read more; source_range uses byte offsets.",
         "input_schema": {
             "type": "object",
-            "properties": {"path": {"type": "string"}},
+            "properties": {"path": {"type": "string"}, "offset": {"type": "integer", "minimum": 0},
+                           "limit": {"type": "integer", "minimum": 1, "maximum": 100000}},
             "required": ["path"],
         },
     },
@@ -204,20 +205,19 @@ TOOLS = [
     },
     {
         "name": "analyze_js",
-        "description": "Fetch a JavaScript file and extract endpoints, interesting API paths, "
-                       "and possible leaked secrets.",
+        "description": "Read complete bounded JavaScript files, discover supported webpack chunks, recover static API contracts, "
+                       "and save a coverage manifest. GET static assets only. Follow read_analysis pages; symbolic values require review.",
         "input_schema": {
             "type": "object",
-            "properties": {"url": {"type": "string"}},
+            "properties": {"url": {"type": "string"}, "include_chunks": {"type": "boolean", "default": True}},
             "required": ["url"],
         },
     },
     {
         "name": "analyze_source_map",
-        "description": "DEEP JS analysis: fetch a bundle's .js.map source map, reconstruct the original "
-                       "readable source (webpack:///src/*) into the workspace, and extract real endpoints, "
-                       "request shapes (fetch/axios call sites), and auth-token flow. Use this on the main "
-                       "bundle — it's far deeper than analyze_js and recovers exact request schemas.",
+        "description": "Read a complete bounded external/inline source map and embedded indexed sections; save embedded sources and "
+                       "static request contracts. Returns a manifest; use read_analysis and read_file for pages. "
+                       "Missing sources and symbolic expressions are explicitly partial, not exact runtime schemas.",
         "input_schema": {
             "type": "object",
             "properties": {"url": {"type": "string", "description": "the .js bundle URL (map is auto-discovered)"}},
@@ -405,7 +405,9 @@ for t in TOOLS:
         t['input_schema']['properties']['evidence_ids']={'type':'array','items':{'type':'integer'}}
         t['input_schema']['required'].append('evidence_ids')
 TOOLS.extend([
+ {'name':'list_analyses','description':'List saved JavaScript/source-map analyses, coverage and artifact IDs for this scan.','input_schema':{'type':'object','properties':{}}},
+ {'name':'read_analysis','description':'Read one complete JSON page of a saved analysis section; follow next_offset until null.','input_schema':{'type':'object','properties':{'analysis_id':{'type':'string'},'section':{'type':'string','enum':['request_shapes','files','endpoints','possible_secrets','warnings','auth_signals']},'offset':{'type':'integer','minimum':0},'limit':{'type':'integer','minimum':1,'maximum':100}},'required':['analysis_id']}},
  {'name':'resolve_lead','description':'Close or promote a lead with a factual reason.','input_schema':{'type':'object','properties':{'lead_id':{'type':'integer'},'status':{'type':'string','enum':['open','chasing','closed','promoted']},'reason':{'type':'string'}},'required':['lead_id','status','reason']}},
  {'name':'list_specs','description':'List saved AST API request shapes.','input_schema':{'type':'object','properties':{}}},
- {'name':'probe_spec','description':'Send one saved request shape. Supply symbolic values explicitly.','input_schema':{'type':'object','properties':{'spec_id':{'type':'integer'},'body':{},'headers':{'type':'object'},'params':{'type':'object'},'confirm_write':{'type':'boolean'}},'required':['spec_id']}}
+ {'name':'probe_spec','description':'Send one reviewed saved request shape. Supply symbolic values explicitly and confirm static inferences.','input_schema':{'type':'object','properties':{'spec_id':{'type':'integer'},'body':{},'headers':{'type':'object'},'params':{'type':'object'},'confirm_write':{'type':'boolean'},'confirm_shape':{'type':'boolean'}},'required':['spec_id']}}
 ])

@@ -18,6 +18,8 @@ export const api = {
   resumeTask:(id:number)=>j(`/api/tasks/${id}/resume`,{method:'POST'}),
   setEffort:(id:number,effort:string)=>j(`/api/tasks/${id}/effort`,{method:'POST',body:JSON.stringify({effort})}),
   specs:(id:number)=>j(`/api/tasks/${id}/specs`),
+  analyses:(id:number)=>j(`/api/tasks/${id}/analyses`),
+  analysisPage:(id:number,analysisId:string,section:string,offset=0)=>j(`/api/tasks/${id}/analyses/${analysisId}?section=${encodeURIComponent(section)}&offset=${offset}&limit=10`),
   mcpServers:()=>j('/api/mcp/servers'),
   testMcp:()=>j('/api/mcp/test',{method:'POST'}),
   linkEvidence:(id:number,evidence_ids:number[])=>j(`/api/findings/${id}/evidence`,{method:'PUT',body:JSON.stringify({evidence_ids})}),

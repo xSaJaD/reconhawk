@@ -161,7 +161,7 @@ export default function Page() {
   return (
     <>
       <div className="topbar">
-        <div className="logo">Recon<span>Hawk</span> <span style={{ fontSize: 10, color: "var(--muted)", fontWeight: 400 }}>v1.7.1</span></div>
+        <div className="logo">Recon<span>Hawk</span> <span style={{ fontSize: 10, color: "var(--muted)", fontWeight: 400 }}>v1.7.2</span></div>
         {navBtn("console", "Console")}
         {navBtn("knowledge", "Knowledge")}
         {navBtn("routines", "Routines")}
@@ -294,7 +294,9 @@ export default function Page() {
               {tab==='Overview'&&<><OverviewStrip taskId={current.id} refreshKey={timeline.length}/><div className="grid grid3">
                 <Panel title="Plan">{plan.map((x,i)=><p key={i}>{i+1}. {x}</p>)}</Panel>
                 <IdeasQueue taskId={current.id} refreshKey={timeline.length}/>
-                <Panel title="Specialists">{subagents.map(x=><p key={x.id}>{x.name} · {x.status} · {x.summary}</p>)}</Panel>
+                <Panel title="Specialists">{subagents.map(x=><details key={x.id}><summary>{x.name} · {x.status}</summary>
+                  {x.coverage?.stop_reason&&<p className="muted">Stop: {x.coverage.stop_reason} · analyses: {x.coverage.analyses?.length||0} · tool errors: {x.coverage.tool_errors?.length||0}</p>}
+                  <pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere'}}>{x.summary}</pre></details>)}</Panel>
                 <Panel title="Leads">{leads.map(x=><p key={x.id}>#{x.id} {x.title} · {x.status}</p>)}</Panel></div></>}
               {tab==='Conversation'&&<><Panel title="Agent conversation">{timeline.filter(e=>parseBody(e.body)?.text).map((e,i)=><pre key={i}>{parseBody(e.body).text}</pre>)}</Panel><ConversationBox taskId={current.id} running={current.status==='running'}/></>}
               {tab==='Assets'&&<><div className="grid"><AssetsPanel taskId={current.id} refreshKey={timeline.length}/><GraphPanel taskId={current.id} refreshKey={timeline.length}/></div><Panel title="Endpoints">{endpoints.map(x=><p key={x.id}>{x.method} {x.url}</p>)}</Panel><Specs taskId={current.id}/></>}

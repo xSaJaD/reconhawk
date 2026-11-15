@@ -25,8 +25,10 @@ class AnthropicLLM:
 
             messages.append({'role':'user','content':'Resume with current policy and persisted context. '+kickoff})
         final_text = ""
+        self.last_stop_reason = 'iteration_limit'
         for _ in range(max_iterations):
             if should_stop():
+                self.last_stop_reason = 'stopped'
                 break
             # Drain any operator messages queued into the running agent.
             if inbox:
@@ -64,6 +66,7 @@ class AnthropicLLM:
 
             tool_uses = [b for b in resp.content if b.type == "tool_use"]
             if resp.stop_reason == "end_turn" or not tool_uses:
+                self.last_stop_reason = 'model_finished' if resp.stop_reason == 'end_turn' else str(resp.stop_reason or 'unknown')
                 messages.append({'role':'assistant','content':[b.model_dump(exclude_none=True) for b in resp.content]})
                 if on_checkpoint: await on_checkpoint(messages)
                 break

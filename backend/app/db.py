@@ -166,6 +166,7 @@ class SubAgent(Base):
     role: Mapped[str] = mapped_column(String(120), default="")
     status: Mapped[str] = mapped_column(String(20), default="spawned")  # spawned|working|done
     summary: Mapped[str] = mapped_column(Text, default="")
+    analysis_json: Mapped[str] = mapped_column(Text, default="{}")
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 

@@ -41,6 +41,7 @@ async def lifespan(app: FastAPI):
     settings.scope_enforced=(await settings_store.get('scope_enforced'))=='true'
     async with SessionLocal() as session:
         await session.execute(update(Task).where(Task.status.in_(['running','queued'])).values(status='paused',stop_reason='service restarted'))
+        await session.execute(update(SubAgent).where(SubAgent.status.in_(['working','spawned'])).values(status='paused'))
         await session.commit()
     scheduler.start()
     telegram_bot.start()
@@ -61,7 +62,7 @@ async def lifespan(app: FastAPI):
             await asyncio.gather(*pending,return_exceptions=True)
 
 
-app = FastAPI(title="ReconHawk API", version="1.7.1", lifespan=lifespan)
+app = FastAPI(title="ReconHawk API", version="1.7.2", lifespan=lifespan)
 @app.middleware('http')
 async def authenticate(request:Request,call_next):
     from .auth import allowed,origin_ok
@@ -445,7 +446,29 @@ async def task_subagents(tid: int):
     async with SessionLocal() as s:
         rows = (await s.execute(select(SubAgent).where(SubAgent.task_id == tid).order_by(desc(SubAgent.id)))).scalars().all()
         return [{"id": a.id, "name": a.name, "role": a.role, "status": a.status,
-                 "summary": a.summary, "created_at": a.created_at.isoformat()} for a in rows]
+                 "summary": a.summary, "coverage": json.loads(a.analysis_json or '{}'),
+                 "created_at": a.created_at.isoformat()} for a in rows]
+
+
+@app.get('/api/tasks/{tid}/analyses')
+async def task_analyses(tid: int):
+    from .tools import analysis_store
+    async with SessionLocal() as session:
+        if not await session.get(Task, tid):
+            raise HTTPException(404, 'Task not found')
+    return analysis_store.list_results(tid)
+
+
+@app.get('/api/tasks/{tid}/analyses/{analysis_id}')
+async def task_analysis_page(tid: int, analysis_id: str, section: str = 'request_shapes', offset: int = 0, limit: int = 20):
+    from .tools import analysis_store
+    async with SessionLocal() as session:
+        if not await session.get(Task, tid):
+            raise HTTPException(404, 'Task not found')
+    try:
+        return analysis_store.read(tid, analysis_id, section, offset, limit)
+    except FileNotFoundError:
+        raise HTTPException(404, 'Analysis not found in this task')
 
 
 @app.get("/api/tasks/{tid}/findings")

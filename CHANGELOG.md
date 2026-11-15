@@ -1,3 +1,28 @@
+# ReconHawk 1.7.2
+
+- Complete bounded JavaScript reads replace the old silent 400,000-character slice.
+  Supported webpack chunks and literal imports are followed through the scoped HTTP
+  transport, with file/byte limits, hashes, preserved source snapshots and coverage.
+- Static contracts follow lexical bindings, known imported/webpack HTTP clients,
+  local wrappers, uniquely exported action creators and declared `fetchConfig` objects.
+  Bodies, query keys, explicit headers, response callbacks and Redux reducer evidence
+  are retained. Conditional values and inferred members remain marked for review.
+- Large source maps are parsed as complete JSON; inline and embedded indexed maps
+  are supported. Missing/external sources and limits produce partial coverage.
+- Analysis manifests, paginated JSON sections and byte-addressed UTF-8 workspace
+  reads replace invalid truncated JSON tool responses. API shapes view shows coverage.
+- JS specialists can read saved sources and analysis pages, cannot send write-method
+  requests, and expose partial/paused/error results and model iteration limits.
+  Full specialist reports and stop reasons are preserved.
+- Secret field-name false positives are suppressed. Known credential patterns are
+  redacted candidates; Google browser keys are classified as public-client identifiers,
+  without asserting a leak or testing their validity.
+- Inferred/alternative contracts require explicit review before `probe_spec`.
+  Relative request URLs resolve against the task document, rather than the JS CDN.
+- Includes prior Claude-branch additions: concurrent/stale-scope sync, program search,
+  27 refreshed built-ins, persistent skill deletion and skill editing; skill URL-name
+  routing is fixed. Existing saved settings are preserved.
+
 # ReconHawk 1.7.1
 
 - Fixed Bounty filtering: canonical `bounty`, legacy `bbp`, explicit VDP, and separate
