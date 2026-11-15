@@ -5,6 +5,11 @@ BACKEND_PORT="${BACKEND_PORT:-8000}"
 FRONTEND_PORT="${FRONTEND_PORT:-3000}"
 PY="$here/backend/.venv/bin/python"
 [ -x "$PY" ] || { echo 'Run ./setup.sh first'; exit 1; }
+# Retain configured origins and allow the local UI on the selected port.
+if [ -z "${CORS_ORIGINS:-}" ]; then
+ CORS_ORIGINS="$(cd "$here/backend"; "$PY" -c 'from app.config import settings; print(settings.cors_origins)')"
+fi
+export CORS_ORIGINS="$CORS_ORIGINS,http://localhost:$FRONTEND_PORT,http://127.0.0.1:$FRONTEND_PORT"
 "$PY" - "$BACKEND_PORT" "$FRONTEND_PORT" <<'PY'
 import socket,sys
 for port in map(int,sys.argv[1:]):

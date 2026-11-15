@@ -37,10 +37,19 @@ class Program(Base):
     policy: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     scope_in: Mapped[str] = mapped_column(Text, default="[]")
     scope_out: Mapped[str] = mapped_column(Text, default="[]")
-    program_type: Mapped[str] = mapped_column(String(20), default="bbp")  # bbp|bounty|vdp
+    program_type: Mapped[str] = mapped_column(String(20), default="unknown")  # bounty|vdp|unknown; legacy bbp is read as bounty
     icon_url: Mapped[str] = mapped_column(String(500), default="")
     # last known scope hash, to detect scope changes for alerting
     scope_hash: Mapped[str] = mapped_column(String(80), default="")
+    scope_sync_status: Mapped[str] = mapped_column(String(30), default="never")
+    scope_sync_error: Mapped[str] = mapped_column(Text, default="")
+    scope_sync_warnings: Mapped[str] = mapped_column(Text, default="[]")
+    scope_assets_json: Mapped[str] = mapped_column(Text, default="[]")
+    scope_sync_started_at: Mapped[Optional[dt.datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    scope_synced_at: Mapped[Optional[dt.datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    scope_asset_count: Mapped[int] = mapped_column(Integer, default=0)
+    scope_web_asset_count: Mapped[int] = mapped_column(Integer, default=0)
+    scope_sync_attempts: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=now)
 
 
@@ -110,6 +119,7 @@ class Finding(Base):
     relation: Mapped[str] = mapped_column(String(20), default="")  # same|new|regressed|bypass
     related_to: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     evidence_ids: Mapped[str] = mapped_column(Text, default='[]')
+    verification_revision: Mapped[int] = mapped_column(Integer, default=0)
     evidence_score: Mapped[int] = mapped_column(Integer, default=0)  # 0-100 evidence quality
     # verification + reporting
     confidence: Mapped[int] = mapped_column(Integer, default=0)  # 0-100

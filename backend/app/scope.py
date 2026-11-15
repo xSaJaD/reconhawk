@@ -4,7 +4,9 @@ import fnmatch
 import ipaddress
 import json
 import socket
-from urllib.parse import urlparse
+import posixpath
+import re
+from urllib.parse import urlparse, unquote, parse_qsl
 
 from .config import settings
 
@@ -44,7 +46,7 @@ def host_in_patterns(host: str, patterns: list[str]) -> bool:
         if not p:
             continue
         # normalize URL-ish patterns down to a host/glob
-        p_host = _host_of(p) if "://" in p else p
+        p_host = _host_of(p)
         if fnmatch.fnmatch(host, p_host) or host == p_host:
             return True
         # wildcard domain form "*.example.com" also matches the apex
@@ -53,11 +55,57 @@ def host_in_patterns(host: str, patterns: list[str]) -> bool:
     return False
 
 
+def url_in_patterns(url: str, patterns: list[str]) -> bool:
+    """A URL rule keeps its scheme, port, path and query restrictions.
+
+    Exact paths match exactly; trailing '/' rules include descendants; explicit
+    '*' path globs are supported. Plain host rules retain host-only semantics.
+    """
+    target = urlparse(url if '://' in url else 'https://' + url)
+    for pattern in patterns:
+        raw = pattern.strip()
+        if not raw:
+            continue
+        rule = urlparse(raw if '://' in raw else 'https://' + raw)
+        if not host_in_patterns((target.hostname or '').lower(), [raw]):
+            continue
+        try:
+            target_port = target.port or (443 if target.scheme == 'https' else 80)
+            if '://' in raw and (rule.scheme != target.scheme or target_port != (rule.port or (443 if rule.scheme == 'https' else 80))):
+                continue
+            if '://' not in raw and rule.port is not None and rule.port != target_port:
+                continue
+        except ValueError:
+            raise ScopeError('Invalid scope URL port')
+        if rule.path and rule.path != '/':
+            # Reject ambiguous separators/dot encoding when enforcing path rules.
+            if re.search(r'%2f|%5c|%2e|%25|%00', target.path, re.IGNORECASE) or any(c in target.path for c in ('\\', ';', '\x00')):
+                continue
+            requested = posixpath.normpath(unquote(target.path or '/'))
+            expected = posixpath.normpath(unquote(rule.path))
+            if '*' in rule.path:
+                if not fnmatch.fnmatchcase(unquote(target.path), unquote(rule.path)):
+                    continue
+            elif rule.path.endswith('/'):
+                if requested != expected and not requested.startswith(expected.rstrip('/') + '/'):
+                    continue
+            elif requested != expected:
+                continue
+        if rule.query and sorted(parse_qsl(rule.query, keep_blank_values=True)) != sorted(parse_qsl(target.query, keep_blank_values=True)):
+            continue
+        return True
+    return False
+
+
 def check_url(url: str, scope_in: list[str], scope_out: list[str]) -> None:
     """Raise ScopeError if the URL must not be touched."""
     parsed = urlparse(url if '://' in url else 'https://' + url)
     if parsed.scheme not in ('http','https') or parsed.username or parsed.password:
         raise ScopeError('Only HTTP(S) URLs without embedded credentials are allowed')
+    try:
+        parsed.port
+    except ValueError as exc:
+        raise ScopeError('Invalid URL port') from exc
     host = _host_of(url)
     if not host:
         raise ScopeError(f"Could not parse host from URL: {url}")
@@ -68,11 +116,17 @@ def check_url(url: str, scope_in: list[str], scope_out: list[str]) -> None:
     if not settings.scope_enforced:
         return
 
-    if scope_out and host_in_patterns(host, scope_out):
+    path_rules = [p for p in scope_in + scope_out if host_in_patterns(host, [p]) and
+                  urlparse(p if '://' in p else 'https://' + p).path not in ('', '/')]
+    if path_rules and (re.search(r'%2f|%5c|%2e|%25|%00', parsed.path, re.IGNORECASE) or
+                       any(c in parsed.path for c in ('\\', ';', '\x00'))):
+        raise ScopeError('Ambiguous URL encoding cannot be used with path-restricted scope')
+
+    if scope_out and url_in_patterns(url, scope_out):
         raise ScopeError(f"Host {host} is explicitly OUT of scope")
 
     if scope_in:
-        if not host_in_patterns(host, scope_in):
+        if not url_in_patterns(url, scope_in):
             raise ScopeError(
                 f"Host {host} is not in the program scope: {scope_in}"
             )

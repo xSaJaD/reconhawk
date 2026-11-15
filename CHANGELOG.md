@@ -1,3 +1,30 @@
+# ReconHawk 1.7.1
+
+- Fixed Bounty filtering: canonical `bounty`, legacy `bbp`, explicit VDP, and separate
+  Unknown classification when HackerOne omits payment eligibility.
+- Complete paginated HackerOne imports with paced scope jobs, transient retries,
+  account rate-limit cooldowns, persisted per-program status/errors, and individual
+  retry buttons. Failed or malformed fetches preserve the last successful scope;
+  complete empty scope responses revoke the previous allowlist.
+- Retained structured asset metadata and instructions, including unsupported mobile,
+  network, and source-code assets for review, without expanding them into web targets.
+- Enforced URL scope scheme, port, path and query restrictions. Exact paths remain
+  exact; trailing slash paths allow descendants; explicit `*` paths support globs.
+- Provider-specific Settings fields, independent optional worker configuration,
+  correct main/worker connection tests, model drafts, and visible save/test errors.
+  Custom endpoints never borrow an OpenAI URL or secret.
+- The launcher preserves configured CORS origins and adds the selected local frontend
+  port, so switching to port 3001 continues to allow backend requests.
+- OpenAI reasoning/token parameters follow the official endpoint and known model
+  capabilities; generic compatible gateways retain standard parameters.
+- Evidence review now includes redacted request/response headers and identity labels.
+  Conditional verdict updates reject changed reports/evidence and superseded reviews.
+- Duplicate/bypass suggestions require the same program and matching asset/endpoint.
+- Eight optional, importable quality playbooks with explicit prerequisites, owned
+  test fixtures, controls, evidence IDs, false-positive checks, and stop conditions.
+- Added regression and browser checks, Arabic upgrade instructions, and a ranked
+  ten-agent review that distinguishes shipped work from future proposals.
+
 # ReconHawk 1.7.0
 
 - Central guarded HTTP transport checks every redirect and derived source-map request,

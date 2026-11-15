@@ -32,6 +32,8 @@ export const api = {
   updateProgram: (id: number, b: any) => j(`/api/programs/${id}`, { method: "PUT", body: JSON.stringify(b) }),
   deleteProgram: (id: number) => j(`/api/programs/${id}`, { method: "DELETE" }),
   syncH1: () => j("/api/programs/sync_h1", { method: "POST" }),
+  h1SyncStatus: () => j('/api/programs/sync_h1/status'),
+  retryScope: (id: number) => j(`/api/programs/${id}/sync_scope`, {method: 'POST'}),
   scanProgram: (id: number) => j(`/api/programs/${id}/scan`, { method: "POST" }),
 
   listTasks: () => j("/api/tasks"),

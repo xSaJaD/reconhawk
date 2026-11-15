@@ -10,6 +10,8 @@ import {
 } from "./panels";
 
 import {Access,Specs,Tools} from './extra';
+import {ScopeStatus} from './scope-status';
+import {programType, syncIsActive, syncSummary} from '../lib/programs';
 function ts(s?: string) { try { return s ? new Date(s).toLocaleTimeString() : ""; } catch { return ""; } }
 
 export default function Page() {
@@ -26,6 +28,10 @@ export default function Page() {
   const [sel, setSel] = useState<number | null>(null);
   const [wsOn, setWsOn] = useState(false);
   const [h1Msg, setH1Msg] = useState("");
+  const [scopeSync, setScopeSync] = useState<any>(null);
+  const [syncEpoch, setSyncEpoch] = useState(0);
+  const [importingH1, setImportingH1] = useState(false);
+  const [connectionError, setConnectionError] = useState('');
   const [progTab, setProgTab] = useState("all");
   const [progDetail, setProgDetail] = useState<any>(null);
   const [showTask, setShowTask] = useState(false);
@@ -47,7 +53,10 @@ export default function Page() {
   // All fetches are guarded so a transient backend hiccup (e.g. during startup)
   // never throws an unhandled rejection into the dev error overlay.
   const refreshTasks = useCallback(async () => { try { setTasks(await api.listTasks()); } catch {} }, []);
-  const refreshPrograms = useCallback(async () => { try { setPrograms(await api.listPrograms()); } catch {} }, []);
+  const refreshPrograms = useCallback(async () => {
+    try { setPrograms(await api.listPrograms()); setConnectionError(''); }
+    catch (error: any) { setConnectionError('Cannot load programs from the backend: ' + error.message); }
+  }, []);
   const refreshNotifs = useCallback(async () => { try { setNotifs(await api.notifications()); } catch {} }, []);
 
   const TL_KINDS = ["log", "tool_call", "status", "finding", "endpoint", "repeater", "screenshot", "lead", "subagent", "addendum", "memory", "intel", "file", "command"];
@@ -100,19 +109,46 @@ export default function Page() {
     return () => { disposed=true; clearTimeout(retry); ws && ws.close(); };
   }, [refreshTasks, refreshNotifs, login]);
 
+  useEffect(() => {
+    if (login) return;
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      try {
+        const status = await api.h1SyncStatus();
+        if (disposed) return;
+        setScopeSync(status); setH1Msg(syncSummary(status));
+        await refreshPrograms();
+        if (!disposed && (syncIsActive(status.status) || status.importing)) timer = setTimeout(poll, 2000);
+      } catch (error: any) {
+        if (!disposed) {
+          setH1Msg('Scope sync status unavailable; retrying: ' + error.message);
+          timer = setTimeout(poll, 5000);
+        }
+      }
+    };
+    poll();
+    return () => { disposed = true; if (timer) clearTimeout(timer); };
+  }, [refreshPrograms, login, syncEpoch]);
+
   const syncH1 = async () => {
+    if (importingH1 || syncIsActive(scopeSync?.status)) return;
+    setImportingH1(true);
     setH1Msg("syncing HackerOne…");
     try {
-      const r = await api.syncH1();
+      await api.syncH1();
       await refreshPrograms();
-      setH1Msg(`${r.total} program(s) · fetching scope…`);
-      // Scopes arrive in the background — refresh a few times to show them filling in.
-      [4000, 10000, 20000, 35000].forEach((ms) => setTimeout(refreshPrograms, ms));
-      setTimeout(() => setH1Msg(""), 40000);
+      setSyncEpoch(value => value + 1);
     } catch (e: any) {
       setH1Msg(e.message);
-      setTimeout(() => setH1Msg(""), 8000);
-    }
+    } finally { setImportingH1(false); }
+  };
+
+  const retryScope = async (id: number) => {
+    try {
+      await api.retryScope(id); await refreshPrograms();
+      setSyncEpoch(value => value + 1);
+    } catch (error: any) { setH1Msg(error.message); }
   };
 
   const current = tasks.find((t) => t.id === sel);
@@ -124,7 +160,7 @@ export default function Page() {
   return (
     <>
       <div className="topbar">
-        <div className="logo">Recon<span>Hawk</span> <span style={{ fontSize: 10, color: "var(--muted)", fontWeight: 400 }}>v1.7</span></div>
+        <div className="logo">Recon<span>Hawk</span> <span style={{ fontSize: 10, color: "var(--muted)", fontWeight: 400 }}>v1.7.1</span></div>
         {navBtn("console", "Console")}
         {navBtn("knowledge", "Knowledge")}
         {navBtn("routines", "Routines")}
@@ -165,6 +201,7 @@ export default function Page() {
         </div>
       )}
 
+      {connectionError && <div role="alert" className="connection-error">{connectionError}</div>}
       <div className="layout">
         <div className="sidebar">
           <div className="row" style={{ justifyContent: "space-between", padding: "12px 14px" }}>
@@ -192,23 +229,23 @@ export default function Page() {
           <div className="section-title row" style={{ justifyContent: "space-between" }}>
             <span>Programs</span>
             <span className="row" style={{ gap: 8 }}>
-              <a onClick={syncH1} style={{ cursor: "pointer", fontSize: 11 }} title="Pull programs + scope from HackerOne">⟳ H1</a>
+              <button onClick={syncH1} disabled={importingH1 || syncIsActive(scopeSync?.status)} style={{ fontSize: 11 }} title="Pull programs + scope from HackerOne">{importingH1 ? 'Importing…' : '⟳ H1'}</button>
               <a onClick={() => setShowProg(true)} style={{ cursor: "pointer", fontSize: 11 }}>+ add</a>
             </span>
           </div>
           <div className="row" style={{ gap: 4, padding: "0 12px 6px", flexWrap: "wrap" }}>
-            {[["all", "All"], ["bbp", "BBP"], ["bounty", "Bounty"], ["vdp", "VDP"]].map(([k, lbl]) => (
+            {[["all", "All"], ["bounty", "Bounty"], ["vdp", "VDP"], ["unknown", "Unknown"]].map(([k, lbl]) => (
               <button key={k} onClick={() => setProgTab(k)}
                 style={{ fontSize: 10, padding: "2px 8px",
                   ...(progTab === k ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }}>
-                {lbl} {k !== "all" && <span className="muted">{programs.filter((p) => p.program_type === k).length}</span>}
+                {lbl} {k !== "all" && <span className="muted">{programs.filter((p) => programType(p.program_type) === k).length}</span>}
               </button>
             ))}
           </div>
           {h1Msg && <div className="t-meta" style={{ padding: "0 16px", color: "var(--accent)" }}>{h1Msg}</div>}
-          {programs.filter((p) => progTab === "all" || p.program_type === progTab).length === 0 &&
+          {programs.filter((p) => progTab === "all" || programType(p.program_type) === progTab).length === 0 &&
             <div className="empty">No {progTab === "all" ? "" : progTab.toUpperCase() + " "}programs.</div>}
-          {programs.filter((p) => progTab === "all" || p.program_type === progTab).map((p) => (
+          {programs.filter((p) => progTab === "all" || programType(p.program_type) === progTab).map((p) => (
             <div key={p.id} className="task-item" style={{ cursor: "pointer" }} onClick={() => setProgDetail(p)}>
               <div className="row" style={{ gap: 8 }}>
                 <ProgramIcon p={p} />
@@ -217,7 +254,8 @@ export default function Page() {
                     <span className="t-target" style={{ fontSize: 13 }}>{p.name}</span>
                     <TypeBadge type={p.program_type} />
                   </div>
-                  <div className="t-meta mono">{(p.scope_in || []).length} assets · {p.platform}</div>
+                  <div className="t-meta mono">{p.scope_sync?.web_asset_count ?? (p.scope_in || []).length} web assets · {p.platform}</div>
+                  <ScopeStatus program={p} onRetry={retryScope} />
                 </div>
               </div>
             </div>
@@ -273,7 +311,7 @@ export default function Page() {
       {showProg && <NewProgramModal onClose={() => setShowProg(false)}
         onCreated={async () => { setShowProg(false); await refreshPrograms(); }} />}
       {showSettings && <SettingsModal onClose={() => { setShowSettings(false); api.health().then(setHealth); }} />}
-      {progDetail && <ProgramDetailModal program={progDetail} onClose={() => setProgDetail(null)}
+      {progDetail && <ProgramDetailModal program={programs.find(p => p.id === progDetail.id) || progDetail} onClose={() => setProgDetail(null)} onRetryScope={retryScope}
         onScan={async (p: any) => {
           const t = await api.scanProgram(p.id);
           setProgDetail(null); await refreshTasks(); loadTask(t.id);

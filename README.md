@@ -1,10 +1,17 @@
-# ReconHawk 1.7
+# ReconHawk 1.7.1
 
 An autonomous, self-hosted web security research console for authorized targets.
 FastAPI + SQLite + Next.js 16, with Anthropic/OpenAI-compatible model adapters.
 
 Start with [the Arabic operation and upgrade guide](START_AR.md). The release changes
 are recorded in [CHANGELOG.md](CHANGELOG.md).
+
+Version 1.7.1 fixes Bounty classification (including existing `bbp` records), adds
+observable HackerOne scope synchronization with per-program retries, and shows only
+the selected model provider's fields in Settings. It also preserves URL scope
+restrictions, rejects stale finding reviews, and separates duplicate suggestions by
+program and endpoint. See the [ten-agent review](docs/AGENT_COMPETITION_AR.md) and
+the [eight optional quality playbooks](skills/README_AR.md).
 
 ```bash
 ./setup.sh
@@ -24,6 +31,7 @@ PYTHONPATH=backend backend/.venv/bin/python -m unittest discover -s backend/test
 cd frontend && npm run build
 ```
 
-This release reconstructs the changes discussed in the project conversation from base
-commit 7d0c1f5883964ff33cdadb684a76a6261767bead. The older roadmap documents are historical
-planning material; they are not a statement that every future roadmap item is implemented.
+This release builds on version 1.7, commit
+`3f7e6ac0654438d026b0e6e1209a01a7ecaf59fc`. The older roadmap documents are historical
+planning material; completed changes and further proposals are distinguished in the
+ten-agent review.

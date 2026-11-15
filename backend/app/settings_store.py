@@ -81,6 +81,9 @@ async def set_many(values: dict) -> None:
             number=float(value) if key=='budget_usd_per_task' else int(value)
             if not limits[key][0]<=number<=limits[key][1]: raise ValueError('Invalid limit: '+key)
         if DEFAULTS[key] in ('true','false') and str(value) not in ('true','false'): raise ValueError('Invalid boolean')
+        if key in ('llm_provider', 'worker_provider') and value not in ('anthropic', 'openai', 'openrouter', 'custom'):
+            if not (key == 'worker_provider' and value == ''):
+                raise ValueError('Unsupported provider')
         if key=='mcp_servers':
             from .mcp_client import validate
             validate(json.loads(value))
