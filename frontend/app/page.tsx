@@ -33,6 +33,7 @@ export default function Page() {
   const [importingH1, setImportingH1] = useState(false);
   const [connectionError, setConnectionError] = useState('');
   const [progTab, setProgTab] = useState("all");
+  const [progSearch, setProgSearch] = useState("");
   const [progDetail, setProgDetail] = useState<any>(null);
   const [showTask, setShowTask] = useState(false);
   const [showProg, setShowProg] = useState(false);
@@ -242,10 +243,14 @@ export default function Page() {
               </button>
             ))}
           </div>
+          <div style={{ padding: "0 12px 6px" }}>
+            <input aria-label="Search programs" value={progSearch} onChange={(e) => setProgSearch(e.target.value)}
+              placeholder="🔍 Search programs…" style={{ width: "100%", fontSize: 12, padding: "4px 8px" }} />
+          </div>
           {h1Msg && <div className="t-meta" style={{ padding: "0 16px", color: "var(--accent)" }}>{h1Msg}</div>}
-          {programs.filter((p) => progTab === "all" || programType(p.program_type) === progTab).length === 0 &&
+          {programs.filter((p) => (progTab === "all" || programType(p.program_type) === progTab) && (progSearch.trim() === "" || ((p.name || "") + " " + (p.handle || "")).toLowerCase().includes(progSearch.trim().toLowerCase()))).length === 0 &&
             <div className="empty">No {progTab === "all" ? "" : progTab.toUpperCase() + " "}programs.</div>}
-          {programs.filter((p) => progTab === "all" || programType(p.program_type) === progTab).map((p) => (
+          {programs.filter((p) => (progTab === "all" || programType(p.program_type) === progTab) && (progSearch.trim() === "" || ((p.name || "") + " " + (p.handle || "")).toLowerCase().includes(progSearch.trim().toLowerCase()))).map((p) => (
             <div key={p.id} className="task-item" style={{ cursor: "pointer" }} onClick={() => setProgDetail(p)}>
               <div className="row" style={{ gap: 8 }}>
                 <ProgramIcon p={p} />
