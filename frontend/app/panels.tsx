@@ -167,6 +167,14 @@ export function SettingsModal({ onClose }: any) {
             <input value={cfg.hackerone_username} onChange={(e) => upd("hackerone_username", e.target.value)} /></div>
           <div className="field"><label>API token</label>
             <input type="password" value={cfg.hackerone_token} onChange={(e) => upd("hackerone_token", e.target.value)} /></div>
+          <div className="field"><label>Sync scopes on startup</label>
+            <select value={cfg.h1_auto_sync} onChange={(e) => upd("h1_auto_sync", e.target.value)}><option value="true">on</option><option value="false">off</option></select></div>
+          <div className="field"><label>Parallel scope requests (1–16)</label>
+            <input value={cfg.h1_sync_concurrency} onChange={(e) => upd("h1_sync_concurrency", e.target.value)} /></div>
+          <div className="field"><label>Requests per second (1–10)</label>
+            <input value={cfg.h1_requests_per_second} onChange={(e) => upd("h1_requests_per_second", e.target.value)} /></div>
+          <div className="field"><label>Refresh scopes older than (hours, 0 = always)</label>
+            <input value={cfg.h1_scope_ttl_hours} onChange={(e) => upd("h1_scope_ttl_hours", e.target.value)} /></div>
         </div>
 
         <h2 style={{ fontSize: 14, marginTop: 10 }}>Automation</h2>

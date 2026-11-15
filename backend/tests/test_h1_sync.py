@@ -61,9 +61,11 @@ class HackerOneSyncTests(unittest.IsolatedAsyncioTestCase):
             return (await session.execute(select(Program).where(
                 Program.platform == "hackerone", Program.handle == handle))).scalars().one()
 
-    async def run_sync(self, fake, handles=None, cfg=None):
+    async def run_sync(self, fake, handles=None, cfg=None, concurrency=1):
+        # Ordered-side-effect tests keep the serial contract; concurrency has its own tests.
         return await h1_sync.sync_scopes(handles or ["alpha"], client=fake,
-                                         cfg=cfg if cfg is not None else {}, sleep=self.sleep)
+                                         cfg=cfg if cfg is not None else {}, sleep=self.sleep,
+                                         concurrency=concurrency)
 
     async def test_import_classifies_and_preserves_omitted_policy(self):
         result = await h1_sync.import_programs([
@@ -219,6 +221,81 @@ class HackerOneSyncTests(unittest.IsolatedAsyncioTestCase):
             await job
         row = await self.row()
         self.assertEqual((row.scope_sync_status, row.scope_in), ("interrupted", '["old.example"]'))
+
+    # ---- speed: concurrent workers, startup refresh of stale scopes only ----
+
+    async def _many(self, count):
+        await h1_sync.import_programs([{"attributes": {"handle": f"p{i}"}} for i in range(count)])
+        return [f"p{i}" for i in range(count)]
+
+    async def test_concurrent_workers_fetch_programs_in_parallel(self):
+        handles = await self._many(12)
+        active = peak = 0
+
+        async def get_scopes(handle):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            return [scope(handle + ".example")]
+
+        result = await self.run_sync(SimpleNamespace(get_scopes=get_scopes), handles, concurrency=6)
+        self.assertEqual((result["status"], result["succeeded"]), ("complete", 12))
+        self.assertGreater(peak, 1)
+        self.assertLessEqual(peak, 6)
+        self.assertEqual((await self.row("p11")).scope_in, '["p11.example"]')
+
+    async def test_rate_limit_stops_new_requests_across_workers(self):
+        handles = await self._many(20)
+        fake = SimpleNamespace(get_scopes=AsyncMock(
+            side_effect=HackerOneError("Cooldown", status_code=429, retry_after=120)))
+        result = await self.run_sync(fake, handles, concurrency=4)
+        self.assertEqual((result["completed"], result["failed"]), (20, 20))
+        # Only requests already in flight when the first 429 arrived may run.
+        self.assertLessEqual(fake.get_scopes.await_count, 4)
+
+    async def test_stale_handles_skip_recent_and_prioritize_never_synced(self):
+        await h1_sync.import_programs([{"attributes": {"handle": "fresh"}}, {"attributes": {"handle": "never"}}])
+        async with self.sessions() as session:
+            row = (await session.execute(select(Program).where(Program.handle == "fresh"))).scalars().one()
+            row.scope_sync_status, row.scope_synced_at = "synced", now()
+            old = (await session.execute(select(Program).where(Program.handle == "alpha"))).scalars().one()
+            old.scope_sync_status = "synced"
+            old.scope_synced_at = now() - __import__("datetime").timedelta(hours=48)
+            await session.commit()
+        order = await h1_sync.stale_handles(["alpha", "fresh", "never"], 12)
+        self.assertEqual(order, ["never", "alpha"])
+        self.assertEqual(await h1_sync.stale_handles(["fresh"], 0), ["fresh"])
+
+    async def test_startup_sync_imports_and_queues_only_stale(self):
+        async with self.sessions() as session:
+            row = await session.get(Program, self.pid)
+            row.scope_sync_status = "synced"
+            await session.commit()
+        fake = SimpleNamespace(
+            list_programs=AsyncMock(return_value=[{"attributes": {"handle": "alpha"}},
+                                                  {"attributes": {"handle": "gamma"}}]),
+            get_scopes=AsyncMock(return_value=[scope("gamma.example")]))
+        result = await h1_sync.startup_sync(client=fake, cfg={"h1_auto_sync": "true"})
+        self.assertEqual((result["status"], result["stale"]), ("queued", 1))
+        await h1_sync._task
+        fake.get_scopes.assert_awaited_once_with("gamma")
+        self.assertEqual((await self.row("gamma")).scope_sync_status, "synced")
+
+    async def test_startup_sync_respects_disable_and_missing_credentials(self):
+        self.assertEqual((await h1_sync.startup_sync(cfg={"h1_auto_sync": "false"}))["status"], "disabled")
+        self.assertEqual((await h1_sync.startup_sync(cfg={"h1_auto_sync": "true"}))["status"], "not_configured")
+
+    async def test_startup_sync_failure_is_reported_not_raised(self):
+        fake = SimpleNamespace(list_programs=AsyncMock(side_effect=HackerOneError("Down", status_code=503)))
+        result = await h1_sync.startup_sync(client=fake, cfg={"h1_auto_sync": "true"})
+        self.assertEqual(result["status"], "error")
+
+    def test_request_interval_follows_configured_rate(self):
+        self.assertAlmostEqual(h1_sync.request_interval({"h1_requests_per_second": "8"}), 0.125)
+        self.assertAlmostEqual(h1_sync.request_interval({"h1_requests_per_second": "999"}), 0.1)
+        self.assertAlmostEqual(h1_sync.request_interval({}), 0.125)
 
 
 if __name__ == "__main__":

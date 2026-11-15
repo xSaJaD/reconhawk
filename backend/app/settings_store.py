@@ -28,6 +28,12 @@ DEFAULTS = {
     "telegram_chat_id": "",
     "hackerone_username": "",
     "hackerone_token": "",
+    # HackerOne scope sync: start in the background when the service starts, refresh only
+    # stale programs, and fetch several programs at once within the API rate limit.
+    "h1_auto_sync": "true",
+    "h1_sync_concurrency": "6",
+    "h1_requests_per_second": "8",
+    "h1_scope_ttl_hours": "12",
     "verify_threshold": "80",
     "auto_verify": "true",
     "auto_telegram": "true",
@@ -74,7 +80,7 @@ async def get(key: str, default: str = "") -> str:
 
 
 async def set_many(values: dict) -> None:
-    limits={'agent_max_iterations':(1,500),'max_steps_per_task':(0,10000),'max_subagents':(0,8),'subagent_max_iterations':(1,100),'max_passes':(1,20),'max_test_accounts':(0,2),'budget_usd_per_task':(0,100000),'verify_threshold':(1,100)}
+    limits={'agent_max_iterations':(1,500),'max_steps_per_task':(0,10000),'max_subagents':(0,8),'subagent_max_iterations':(1,100),'max_passes':(1,20),'max_test_accounts':(0,2),'budget_usd_per_task':(0,100000),'verify_threshold':(1,100),'h1_sync_concurrency':(1,16),'h1_requests_per_second':(1,10),'h1_scope_ttl_hours':(0,168)}
     for key,value in values.items():
         if key not in DEFAULTS: raise ValueError('Unknown setting: '+key)
         if key in limits:

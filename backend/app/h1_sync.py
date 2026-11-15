@@ -26,6 +26,35 @@ _cooldown_until = 0.0
 _state = {"status": "idle", "total": 0, "completed": 0, "succeeded": 0, "failed": 0}
 MAX_ATTEMPTS = 3
 MAX_RETRY_DELAY = 60.0
+DEFAULT_CONCURRENCY = 6
+DEFAULT_REQUESTS_PER_SECOND = 8.0
+DEFAULT_TTL_HOURS = 12.0
+_startup_task: asyncio.Task | None = None
+
+
+def _number(cfg: dict, key: str, default: float, low: float, high: float) -> float:
+    try:
+        value = float(cfg.get(key) or default)
+    except (TypeError, ValueError):
+        return default
+    return min(high, max(low, value))
+
+
+def request_interval(cfg: dict) -> float:
+    """Seconds between request starts, from the configured requests/second."""
+    return 1.0 / _number(cfg, "h1_requests_per_second", DEFAULT_REQUESTS_PER_SECOND, 1, 10)
+
+
+async def close_client(client) -> None:
+    """Close a pooled client if it has one (test doubles and old clients may not)."""
+    closer = getattr(client, "aclose", None)
+    if closer is not None:
+        await closer()
+
+
+def make_client(cfg: dict) -> HackerOneClient:
+    return HackerOneClient(cfg.get("hackerone_username", ""), cfg.get("hackerone_token", ""),
+                           min_request_interval=request_interval(cfg))
 
 
 def timestamp(value) -> str | None:
@@ -192,37 +221,56 @@ async def _fetch_one(handle: str, client, cfg: dict, sleep) -> dict:
     raise RuntimeError("Unreachable attempt state")
 
 
-async def sync_scopes(handles: list[str], *, client=None, cfg=None, sleep=None) -> dict:
-    """Bounded job; injectable client and delay keep tests offline."""
+async def sync_scopes(handles: list[str], *, client=None, cfg=None, sleep=None,
+                      concurrency: int | None = None) -> dict:
+    """Bounded job; injectable client and delay keep tests offline.
+
+    Programs are fetched by a small pool of workers (h1_sync_concurrency) sharing one
+    rate-limited client. A 429 is an account-wide signal: once any worker sees one,
+    every remaining program is deferred visibly instead of being requested too early.
+    """
     global _state, _cooldown_until
     handles = list(dict.fromkeys(handles))
     cfg = cfg if cfg is not None else await settings_store.get_all()
     sleep = sleep or asyncio.sleep
+    workers = int(concurrency or _number(cfg, "h1_sync_concurrency", DEFAULT_CONCURRENCY, 1, 16))
     _state = {"id": str(uuid.uuid4()), "status": "running", "total": len(handles), "completed": 0,
-              "succeeded": 0, "failed": 0, "results": [], "started_at": now().isoformat()}
+              "succeeded": 0, "failed": 0, "results": [], "started_at": now().isoformat(),
+              "concurrency": workers}
+    owned_client = client is None
     try:
         if client is None:
-            client = HackerOneClient(cfg.get("hackerone_username", ""), cfg.get("hackerone_token", ""), min_request_interval=1.3)
-        cooldown = None
-        for handle in handles:
+            client = make_client(cfg)
+        pending = list(handles)
+        shared: dict = {"cooldown": None}
+
+        async def run_one(handle: str) -> dict:
+            global _cooldown_until
+            cooldown = shared["cooldown"]
             if cooldown is not None:
                 message = "Deferred after HackerOne rate limiting; retry this program after the cooldown."
                 if cooldown.get("retry_after") is not None:
                     message += f" Server requested {cooldown['retry_after']} seconds."
                 error = HackerOneError(message, status_code=429, retry_after=cooldown.get("retry_after"))
                 await _set_error(handle, error, cfg)
-                result = {"handle": handle, "status": "rate_limited", "error": message,
-                          "retry_after": cooldown.get("retry_after")}
-            else:
-                result = await _fetch_one(handle, client, cfg, sleep)
-                if result["status"] == "rate_limited":
-                    # A cooldown applies to the account, not just this one program. Preserve
-                    # and expose the remaining work instead of sending requests too early.
-                    cooldown = result
-                    _cooldown_until = time.monotonic() + max(1.0, float(result.get("retry_after") or 60.0))
-            _state["results"].append(result)
-            _state["completed"] += 1
-            _state["succeeded" if result["status"] in ("synced", "empty") else "failed"] += 1
+                return {"handle": handle, "status": "rate_limited", "error": message,
+                        "retry_after": cooldown.get("retry_after")}
+            result = await _fetch_one(handle, client, cfg, sleep)
+            if result["status"] == "rate_limited" and shared["cooldown"] is None:
+                # A cooldown applies to the account, not just this one program.
+                shared["cooldown"] = result
+                _cooldown_until = time.monotonic() + max(1.0, float(result.get("retry_after") or 60.0))
+            return result
+
+        async def worker() -> None:
+            while pending:
+                handle = pending.pop(0)
+                result = await run_one(handle)
+                _state["results"].append(result)
+                _state["completed"] += 1
+                _state["succeeded" if result["status"] in ("synced", "empty") else "failed"] += 1
+
+        await asyncio.gather(*(worker() for _ in range(max(1, min(workers, len(handles) or 1)))))
         _state["status"] = "complete" if not _state["failed"] else "partial"
     except asyncio.CancelledError:
         _state["status"] = "interrupted"
@@ -235,12 +283,14 @@ async def sync_scopes(handles: list[str], *, client=None, cfg=None, sleep=None) 
         _state["failed"] = len(handles)
     finally:
         _state["finished_at"] = now().isoformat()
+        if owned_client and client is not None:
+            await close_client(client)
     await _notify("success" if _state["status"] == "complete" else "warn", "HackerOne scope sync finished",
                   f"{_state['succeeded']}/{len(handles)} synchronized; {_state['failed']} failed. See program sync status for details.")
     return status()
 
 
-async def queue_scopes(handles: list[str]) -> dict:
+async def queue_scopes(handles: list[str], *, client=None, cfg=None) -> dict:
     global _task, _state
     async with _queue_lock:
         ensure_available()
@@ -251,8 +301,84 @@ async def queue_scopes(handles: list[str]) -> dict:
             ).values(scope_sync_status="queued", scope_sync_error="", scope_sync_attempts=0))
             await session.commit()
         _state = {"status": "queued", "total": len(handles), "completed": 0, "succeeded": 0, "failed": 0, "results": []}
-        _task = asyncio.create_task(sync_scopes(handles))
+        extra = {key: value for key, value in (("client", client), ("cfg", cfg)) if value is not None}
+        _task = asyncio.create_task(sync_scopes(handles, **extra))
         return status()
+
+
+async def stale_handles(handles: list[str], ttl_hours: float, *, at=None) -> list[str]:
+    """Programs whose scope needs a refresh, never-synced and failed ones first.
+
+    A program synced successfully within ttl_hours is skipped, so a restart refreshes
+    only what is missing or old instead of re-downloading every scope.
+    """
+    if not handles:
+        return []
+    current = at or now()
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=dt.timezone.utc)
+    cutoff = current - dt.timedelta(hours=ttl_hours)
+    async with SessionLocal() as session:
+        rows = (await session.execute(select(Program).where(
+            Program.platform == "hackerone", Program.handle.in_(handles)
+        ))).scalars().all()
+    by_handle = {row.handle: row for row in rows}
+    urgent, old = [], []
+    for handle in dict.fromkeys(handles):
+        row = by_handle.get(handle)
+        synced = row.scope_synced_at if row else None
+        if synced is not None and synced.tzinfo is None:
+            synced = synced.replace(tzinfo=dt.timezone.utc)
+        healthy = row is not None and row.scope_sync_status in ("synced", "empty")
+        if row is None or synced is None or not healthy:
+            urgent.append(handle)
+        elif ttl_hours <= 0 or synced < cutoff:
+            old.append((synced, handle))
+    return urgent + [handle for _, handle in sorted(old)]
+
+
+async def startup_sync(*, client=None, cfg=None) -> dict:
+    """Background refresh at service start: list programs, then sync only stale scopes."""
+    cfg = cfg if cfg is not None else await settings_store.get_all()
+    if cfg.get("h1_auto_sync", "true") != "true":
+        return {"status": "disabled"}
+    if not (cfg.get("hackerone_username") and cfg.get("hackerone_token")) and client is None:
+        return {"status": "not_configured"}
+    owned = client is None
+    client = client or make_client(cfg)
+    try:
+        async with IMPORT_LOCK:
+            if running():
+                return {"status": "busy"}
+            programs = await client.list_programs()
+            summary = await import_programs(programs)
+        ttl = _number(cfg, "h1_scope_ttl_hours", DEFAULT_TTL_HOURS, 0, 168)
+        handles = await stale_handles(summary["handles"], ttl)
+        if not handles:
+            if owned:
+                await close_client(client)
+            return {"status": "fresh", "programs": summary["total"]}
+        # The sync job takes ownership of the client and closes it when it finishes.
+        await queue_scopes(handles, client=client, cfg=cfg)
+        if owned:
+            _task.add_done_callback(lambda _t: asyncio.ensure_future(close_client(client)))
+        return {"status": "queued", "programs": summary["total"], "stale": len(handles)}
+    except asyncio.CancelledError:
+        if owned:
+            await close_client(client)
+        raise
+    except Exception as exc:
+        log.warning("HackerOne startup sync skipped: %s", _safe_error(exc, cfg))
+        if owned:
+            await close_client(client)
+        return {"status": "error", "error": _safe_error(exc, cfg)}
+
+
+def start_startup_sync() -> None:
+    """Fire-and-forget: never delays API startup, even when HackerOne is slow."""
+    global _startup_task
+    if _startup_task is None or _startup_task.done():
+        _startup_task = asyncio.create_task(startup_sync())
 
 
 async def _mark_interrupted(handles=None) -> None:
@@ -271,7 +397,11 @@ async def recover_interrupted() -> None:
 
 
 async def stop() -> None:
-    global _task, _cooldown_until
+    global _task, _cooldown_until, _startup_task
+    if _startup_task is not None and not _startup_task.done():
+        _startup_task.cancel()
+        await asyncio.gather(_startup_task, return_exceptions=True)
+    _startup_task = None
     if running():
         _task.cancel()
         await asyncio.gather(_task, return_exceptions=True)
