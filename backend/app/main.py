@@ -44,6 +44,9 @@ async def lifespan(app: FastAPI):
         await session.commit()
     scheduler.start()
     telegram_bot.start()
+    # Refresh HackerOne programs and stale scopes in the background right away;
+    # the API is usable immediately and the UI shows progress via /sync_h1/status.
+    h1_sync.start_startup_sync()
     try:
         yield
     finally:
@@ -260,13 +263,15 @@ async def sync_h1_programs():
             raise HTTPException(409, str(exc))
         cfg = await settings_store.get_all()
         try:
-            client = HackerOneClient(cfg.get("hackerone_username", ""), cfg.get("hackerone_token", ""), min_request_interval=1.3)
+            client = h1_sync.make_client(cfg)
         except HackerOneError as exc:
             raise HTTPException(400, str(exc))
         try:
             programs = await client.list_programs()
         except (HackerOneError, httpx.HTTPError) as exc:
             raise HTTPException(502, str(exc))
+        finally:
+            await h1_sync.close_client(client)
         summary = await h1_sync.import_programs(programs)
         handles = summary.pop("handles")
         job = await h1_sync.queue_scopes(handles) if handles else h1_sync.status()
