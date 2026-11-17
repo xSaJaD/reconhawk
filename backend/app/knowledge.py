@@ -103,13 +103,35 @@ async def enabled_skills() -> list[Skill]:
 async def skills_context() -> str:
     skills = await enabled_skills()
     if not skills:
-        return ""
-    lines = ["You have the following loaded testing playbooks. Apply them where relevant:"]
+        return (
+            "No testing skills are loaded, so your coverage is limited to generic recon. "
+            "Tell the operator that adding skills (Knowledge → Skills) will make the scan "
+            "deeper and more targeted."
+        )
+    names = ", ".join(sk.name for sk in skills)
+    lines = [
+        "# LOADED SKILLS — THESE DRIVE YOUR SCAN",
+        "",
+        "The operator has loaded the playbooks below. They are your PRIMARY methodology, not "
+        "optional hints. Your scan's depth and quality come from these skills: cover EVERY enabled "
+        "skill that could apply to this target, follow each one's steps precisely, and use its exact "
+        "payloads and bypass techniques. Do not fall back to a shallow generic pass while any loaded "
+        "skill still has untested steps against this target. In your plan, create a step per applicable "
+        "skill and track it to a concrete result (confirmed / disproven with evidence / parked with reason).",
+        f"\nLoaded skills: {names}",
+    ]
     for sk in skills:
-        parts = [f"\n### {sk.name} ({sk.category})", sk.playbook]
-        for extra in (sk.payloads_json, sk.bypass_table_md, sk.references_md):
-            if extra and extra.strip():
-                parts.append(extra.strip())
+        parts = [f"\n## {sk.name}  ·  [{sk.category}]"]
+        if sk.summary:
+            parts.append(f"_{sk.summary}_")
+        if sk.playbook:
+            parts.append(f"**Playbook / steps:**\n{sk.playbook}")
+        if sk.payloads_json and sk.payloads_json.strip():
+            parts.append(f"**Payloads (use these exact values, adapt to the endpoint):**\n{sk.payloads_json.strip()}")
+        if sk.bypass_table_md and sk.bypass_table_md.strip():
+            parts.append(f"**Bypass / evasion techniques:**\n{sk.bypass_table_md.strip()}")
+        if sk.references_md and sk.references_md.strip():
+            parts.append(f"**References:**\n{sk.references_md.strip()}")
         lines.append("\n".join(parts))
     return "\n".join(lines)
 

@@ -6,7 +6,7 @@ import {
   Panel, parseBody, SettingsModal, RoutinesView, FilesView, ChatView, KnowledgeView,
   RepeaterPanel, FindingCard, NewTaskModal, NewProgramModal, OverviewStrip, WorkspacePanel,
   IdeasQueue, AssetsPanel, GraphPanel, HealthPanel, ConversationBox,
-  ProgramIcon, TypeBadge, ProgramDetailModal,
+  ProgramIcon, TypeBadge, ProgramDetailModal, TimelineItem,
 } from "./panels";
 
 import {Access,Specs,Tools} from './extra';
@@ -161,7 +161,7 @@ export default function Page() {
   return (
     <>
       <div className="topbar">
-        <div className="logo">Recon<span>Hawk</span> <span style={{ fontSize: 10, color: "var(--muted)", fontWeight: 400 }}>v1.7.1</span></div>
+        <div className="logo">Recon<span>Hawk</span> <span style={{ fontSize: 10, color: "var(--muted)", fontWeight: 400 }}>v1.7.2</span></div>
         {navBtn("console", "Console")}
         {navBtn("knowledge", "Knowledge")}
         {navBtn("routines", "Routines")}
@@ -299,7 +299,7 @@ export default function Page() {
               {tab==='Conversation'&&<><Panel title="Agent conversation">{timeline.filter(e=>parseBody(e.body)?.text).map((e,i)=><pre key={i}>{parseBody(e.body).text}</pre>)}</Panel><ConversationBox taskId={current.id} running={current.status==='running'}/></>}
               {tab==='Assets'&&<><div className="grid"><AssetsPanel taskId={current.id} refreshKey={timeline.length}/><GraphPanel taskId={current.id} refreshKey={timeline.length}/></div><Panel title="Endpoints">{endpoints.map(x=><p key={x.id}>{x.method} {x.url}</p>)}</Panel><Specs taskId={current.id}/></>}
               {['Findings','Reports'].includes(tab)&&<Panel title={tab}>{findings.filter(f=>tab!=='Reports'||f.report_md).map(f=><FindingCard key={f.id} f={f} onChange={()=>api.findings(current.id).then(setFindings)}/>)}</Panel>}
-              {tab==='Activity'&&<Panel title="Activity">{timeline.slice().reverse().map((e,i)=><div className="timeline-item" key={i}><span className="kind-tag">{e.kind}</span>{e.title||parseBody(e.body)?.text}<div className="ts">{ts(e.created_at)}</div></div>)}</Panel>}
+              {tab==='Activity'&&<Panel title="Activity">{timeline.length===0?<div className="empty">Waiting…</div>:timeline.slice().reverse().map((e,i)=><TimelineItem key={e.id??i} e={e} />)}</Panel>}
               {tab==='Health'&&<HealthPanel taskId={current.id} refreshKey={timeline.length}/>}
               {tab==='Files'&&<WorkspacePanel taskId={current.id} refreshKey={timeline.length}/>}
               {tab==='Tools'&&<Tools/>}

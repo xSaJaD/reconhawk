@@ -68,6 +68,13 @@ class SubAgentRun:
         final = ""
         status = "done"
         try:
+            # Sub-agents inherit the operator's loaded skills so delegated work follows the
+            # same playbooks/payloads as the lead — stronger skills ⇒ stronger sub-agents.
+            from .. import knowledge
+            sys_prompt = ROLE_SYSTEM + '\nPROGRAM POLICY:\n' + getattr(self.parent, 'policy', '')
+            skills_ctx = await knowledge.skills_context()
+            if skills_ctx:
+                sys_prompt += "\n\n=== LOADED SKILLS (your methodology) ===\n" + skills_ctx
             # Prefer the cheaper worker model for sub-agents.
             llm = build_llm(cfg, provider=cfg["worker_provider"], model=cfg["worker_model"])
             allowed={t['name'] for t in _tools_for(self.role)}
@@ -75,7 +82,7 @@ class SubAgentRun:
                 if name not in allowed: return 'Tool not permitted for specialist.',True
                 return await self.parent.dispatch(name,args)
             final = await llm.agent_loop(
-                system=ROLE_SYSTEM+'\nPROGRAM POLICY:\n'+getattr(self.parent,'policy',''),
+                system=sys_prompt,
                 kickoff=f"Specialist role: {self.role}\nDelegated task:\n{self.brief}\n\n"
                         f"Target: {self.parent.target}. Work in scope, go deep, report evidence.",
                 tools=_tools_for(self.role),

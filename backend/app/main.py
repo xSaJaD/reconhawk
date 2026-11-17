@@ -864,8 +864,9 @@ async def list_skills():
                  "tags": sk.tags, "source": sk.source} for sk in rows]
 
 
-@app.put("/api/skills/{name}/toggle")
+@app.put("/api/skills/toggle")
 async def toggle_skill(name: str):
+    # name is a query param: skill names can contain '/' which breaks path routing.
     async with SessionLocal() as s:
         sk = await s.get(Skill, name)
         if not sk:
@@ -960,8 +961,9 @@ async def upload_skills(body: dict):
     return {"added": added, "replaced": replaced, "skipped": skipped, "names": names}
 
 
-@app.put("/api/skills/{name}")
+@app.put("/api/skills")
 async def edit_skill(name: str, body: dict):
+    # name is a query param: skill names can contain '/' which breaks path routing.
     async with SessionLocal() as s:
         sk = await s.get(Skill, name)
         if not sk:
@@ -978,8 +980,9 @@ async def edit_skill(name: str, body: dict):
         return {"name": sk.name, "ok": True}
 
 
-@app.delete("/api/skills/{name}")
+@app.delete("/api/skills")
 async def delete_skill(name: str):
+    # name is a query param: skill names can contain '/' which breaks path routing.
     async with SessionLocal() as s:
         sk = await s.get(Skill, name)
         if not sk:

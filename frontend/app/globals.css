@@ -83,6 +83,20 @@ pre { white-space: pre-wrap; word-break: break-word; background: var(--panel2);
   border: 1px solid var(--border); border-radius: 6px; padding: 10px; font-size: 11px;
   font-family: var(--mono); max-height: 240px; overflow: auto; }
 .empty { color: var(--muted); font-size: 12px; padding: 20px 0; text-align: center; }
+/* Expandable Activity request/response detail */
+.timeline-item.expandable > div:first-child:hover { color: #fff; }
+.tl-caret { color: var(--muted); margin-right: 4px; font-size: 10px; }
+.st-pill { display: inline-block; font-family: var(--mono); font-size: 10px; font-weight: 700;
+  padding: 0 5px; border-radius: 4px; margin-right: 6px; }
+.st-2xx { background: #12301f; color: var(--accent); }
+.st-3xx { background: #2a2410; color: var(--warn); }
+.st-4xx { background: #331a1f; color: var(--warn); }
+.st-5xx { background: #3a1216; color: var(--crit); }
+.req-detail { margin: 6px 0 4px 14px; border-left: 2px solid var(--border); padding-left: 10px; }
+.req-section-label { font-size: 9px; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--accent2, #4aa8ff); margin: 6px 0 3px; font-weight: 700; }
+.req-block { margin: 0 0 6px; font-size: 11px; max-height: 200px; }
+.req-block.resp-body { max-height: 320px; color: var(--text); }
 .dot { width: 8px; height: 8px; border-radius: 99px; display: inline-block; }
 .dot.on { background: var(--accent); } .dot.off { background: var(--crit); }
 

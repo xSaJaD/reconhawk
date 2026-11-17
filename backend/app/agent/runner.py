@@ -341,7 +341,13 @@ class AgentRun:
                 await bus.emit(self.task_id, "repeater",
                                f"{args['method'].upper()} {args['url']} → {res['status_code']}",
                                {"method": args["method"].upper(), "url": args["url"],
-                                "status": res["status_code"], "duration_ms": res["duration_ms"]})
+                                "status": res["status_code"], "duration_ms": res["duration_ms"],
+                                "classification": res.get("classification"),
+                                "request_headers": redact.headers(args.get("headers") or {}),
+                                "request_body": redact.text((args.get("body") or ""))[:4000],
+                                "response_headers": redact.headers(res["response_headers"]),
+                                "response_body": redact.text(res["response_body"])[:6000],
+                                "final_url": res.get("final_url")})
                 fb = {k: res.get(k) for k in ("status_code", "response_headers", "duration_ms", "final_url", "truncated", "classification")}
                 fb["repeater_id"]=request_id
                 fb["response_body"] = res["response_body"][:8000]
@@ -391,7 +397,15 @@ class AgentRun:
                     await s.refresh(request_row)
                     request_id=request_row.id
                 await bus.emit(self.task_id, "repeater", f"as {label}: {method.upper()} {url} → {res['status_code']}",
-                               {"identity": label, "method": method.upper(), "url": url, "status": res["status_code"]})
+                               {"identity": label, "method": method.upper(), "url": url,
+                                "status": res["status_code"], "duration_ms": res["duration_ms"],
+                                "classification": res.get("classification"),
+                                "request_headers": {**redact.headers(base_headers),
+                                                    "Cookie": "[identity:" + label + "]",
+                                                    "Authorization": "[identity:" + label + "]"},
+                                "request_body": redact.text((body or ""))[:4000],
+                                "response_headers": redact.headers(res["response_headers"]),
+                                "response_body": redact.text(res["response_body"])[:6000]})
                 fb = {k: res.get(k) for k in ("status_code", "duration_ms", "classification")}
                 fb["repeater_id"]=request_id
                 fb["response_body"] = res["response_body"][:8000]
