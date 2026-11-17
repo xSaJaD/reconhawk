@@ -101,10 +101,35 @@ async def enabled_skills() -> list[Skill]:
 async def skills_context() -> str:
     skills = await enabled_skills()
     if not skills:
-        return ""
-    lines = ["You have the following loaded testing playbooks. Apply them where relevant:"]
+        return (
+            "No testing skills are loaded. Your coverage is limited to generic recon. "
+            "Tell the operator that adding skills (Knowledge → Skills) will make the scan "
+            "deeper and more targeted."
+        )
+    names = ", ".join(sk.name for sk in skills)
+    lines = [
+        "# LOADED SKILLS — THESE DRIVE YOUR SCAN",
+        "",
+        "The operator has loaded the playbooks below. They are your PRIMARY methodology, not "
+        "optional hints. Your scan's depth and quality come from these skills: cover EVERY enabled "
+        "skill that could apply to this target, follow each one's steps precisely, and use its exact "
+        "payloads and bypass techniques. Do not fall back to a shallow generic pass while any loaded "
+        "skill still has untested steps against this target. In your plan, create a step per applicable "
+        "skill and track it to a concrete result (confirmed / disproven with evidence / parked with reason).",
+        f"\nLoaded skills: {names}",
+    ]
     for sk in skills:
-        lines.append(f"\n### {sk.name} ({sk.category})\n{sk.playbook}")
+        lines.append(f"\n## {sk.name}  ·  [{sk.category}]")
+        if sk.summary:
+            lines.append(f"_{sk.summary}_")
+        if sk.playbook:
+            lines.append(f"\n**Playbook / steps:**\n{sk.playbook}")
+        if (sk.payloads_json or "").strip():
+            lines.append(f"\n**Payloads to try (use these exact values, adapt to the endpoint):**\n{sk.payloads_json}")
+        if (sk.bypass_table_md or "").strip():
+            lines.append(f"\n**Bypass / evasion techniques:**\n{sk.bypass_table_md}")
+        if (sk.references_md or "").strip():
+            lines.append(f"\n**References:**\n{sk.references_md}")
     return "\n".join(lines)
 
 

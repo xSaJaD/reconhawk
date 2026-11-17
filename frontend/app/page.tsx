@@ -6,7 +6,7 @@ import {
   Panel, parseBody, SettingsModal, RoutinesView, FilesView, ChatView, KnowledgeView,
   RepeaterPanel, FindingCard, NewTaskModal, NewProgramModal, OverviewStrip, WorkspacePanel,
   IdeasQueue, AssetsPanel, GraphPanel, HealthPanel, ConversationBox,
-  ProgramIcon, TypeBadge, ProgramDetailModal,
+  ProgramIcon, TypeBadge, ProgramDetailModal, TimelineItem,
 } from "./panels";
 
 function ts(s?: string) { try { return s ? new Date(s).toLocaleTimeString() : ""; } catch { return ""; } }
@@ -118,7 +118,7 @@ export default function Page() {
   return (
     <>
       <div className="topbar">
-        <div className="logo">Recon<span>Hawk</span> <span style={{ fontSize: 10, color: "var(--muted)", fontWeight: 400 }}>v1.6</span></div>
+        <div className="logo">Recon<span>Hawk</span> <span style={{ fontSize: 10, color: "var(--muted)", fontWeight: 400 }}>v1.7</span></div>
         {navBtn("console", "Console")}
         {navBtn("knowledge", "Knowledge")}
         {navBtn("routines", "Routines")}
@@ -286,17 +286,9 @@ export default function Page() {
                 </Panel>
                 <Panel title="Live timeline" grow>
                   {timeline.length === 0 ? <div className="empty">Waiting…</div> :
-                    timeline.slice().reverse().map((e, i) => {
-                      const b = parseBody(e.body);
-                      return (
-                        <div key={i} className="timeline-item">
-                          <span className="kind-tag">{e.kind}</span>
-                          {e.title || (b && b.text) || (b && b.tool) || ""}
-                          {e.kind === "tool_call" && b?.input && <span className="muted mono"> {JSON.stringify(b.input).slice(0, 100)}</span>}
-                          <div className="ts">{ts(e.created_at)}</div>
-                        </div>
-                      );
-                    })}
+                    timeline.slice().reverse().map((e, i) => (
+                      <TimelineItem key={e.id ?? i} e={e} />
+                    ))}
                 </Panel>
               </div>
 
