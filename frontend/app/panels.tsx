@@ -16,6 +16,56 @@ export function parseBody(b: string): any {
   try { return JSON.parse(b); } catch { return b; }
 }
 
+/* ---- Live-timeline row. Expandable for requests (full req/resp) & tool calls. ---- */
+function headersToText(h: any): string {
+  if (!h) return "";
+  if (typeof h === "string") { try { h = JSON.parse(h); } catch { return h; } }
+  if (typeof h !== "object") return String(h);
+  return Object.entries(h).map(([k, v]) => `${k}: ${v}`).join("\n");
+}
+
+export function TimelineItem({ e }: { e: any }) {
+  const [open, setOpen] = useState(false);
+  const b = parseBody(e.body);
+  const isReq = e.kind === "repeater" && b && (b.request_headers !== undefined || b.response_body !== undefined || b.url);
+  const isTool = e.kind === "tool_call" && b?.input;
+  const expandable = isReq || isTool;
+  const statusCls = (st: number) =>
+    st >= 500 ? "st-5xx" : st >= 400 ? "st-4xx" : st >= 300 ? "st-3xx" : "st-2xx";
+
+  return (
+    <div className={"timeline-item" + (expandable ? " expandable" : "")}>
+      <div onClick={() => expandable && setOpen(!open)} style={expandable ? { cursor: "pointer" } : {}}>
+        {expandable && <span className="tl-caret">{open ? "▾" : "▸"}</span>}
+        <span className="kind-tag">{e.kind}</span>
+        {isReq && b.status != null && <span className={"st-pill " + statusCls(b.status)}>{b.status}</span>}
+        {e.title || (b && b.text) || (b && b.tool) || ""}
+        {isReq && b.classification && <span className="muted mono"> · {b.classification}</span>}
+        {isReq && b.duration_ms != null && <span className="muted"> · {b.duration_ms}ms</span>}
+        {isTool && <span className="muted mono"> {JSON.stringify(b.input).slice(0, 80)}</span>}
+        <div className="ts">{(() => { try { return new Date(e.created_at).toLocaleTimeString(); } catch { return ""; } })()}</div>
+      </div>
+      {open && isReq && (
+        <div className="req-detail">
+          <div className="req-section-label">▸ REQUEST</div>
+          <pre className="req-block">{(b.method || "GET") + " " + (b.url || "")}</pre>
+          {headersToText(b.request_headers) && <pre className="req-block">{headersToText(b.request_headers)}</pre>}
+          {b.request_body ? <pre className="req-block">{b.request_body}</pre> : null}
+          <div className="req-section-label">◂ RESPONSE {b.status != null ? "· " + b.status : ""}{b.final_url && b.final_url !== b.url ? " · → " + b.final_url : ""}</div>
+          {headersToText(b.response_headers) && <pre className="req-block">{headersToText(b.response_headers)}</pre>}
+          <pre className="req-block resp-body">{b.response_body || "(empty body)"}</pre>
+        </div>
+      )}
+      {open && isTool && (
+        <div className="req-detail">
+          <pre className="req-block">{JSON.stringify(b.input, null, 2)}</pre>
+          {b.output && <pre className="req-block resp-body">{typeof b.output === "string" ? b.output : JSON.stringify(b.output, null, 2)}</pre>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ------------------------- Settings modal ------------------------- */
 export function SettingsModal({ onClose }: any) {
   const [cfg, setCfg] = useState<any>(null);

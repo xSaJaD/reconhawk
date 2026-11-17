@@ -310,7 +310,13 @@ class AgentRun:
                 await bus.emit(self.task_id, "repeater",
                                f"{args['method'].upper()} {args['url']} → {res['status_code']}",
                                {"method": args["method"].upper(), "url": args["url"],
-                                "status": res["status_code"], "duration_ms": res["duration_ms"]})
+                                "status": res["status_code"], "duration_ms": res["duration_ms"],
+                                "classification": res.get("classification"),
+                                "request_headers": args.get("headers") or {},
+                                "request_body": (args.get("body") or "")[:4000],
+                                "response_headers": res["response_headers"],
+                                "response_body": res["response_body"][:6000],
+                                "final_url": res.get("final_url")})
                 fb = {k: res.get(k) for k in ("status_code", "response_headers", "duration_ms", "final_url", "truncated", "classification")}
                 fb["response_body"] = res["response_body"][:8000]
                 return json.dumps(fb), False
@@ -356,7 +362,14 @@ class AgentRun:
                         response_body=res["response_body"], duration_ms=res["duration_ms"]))
                     await s.commit()
                 await bus.emit(self.task_id, "repeater", f"as {label}: {method.upper()} {url} → {res['status_code']}",
-                               {"identity": label, "method": method.upper(), "url": url, "status": res["status_code"]})
+                               {"identity": label, "method": method.upper(), "url": url,
+                                "status": res["status_code"], "duration_ms": res["duration_ms"],
+                                "classification": res.get("classification"),
+                                "request_headers": {**base_headers, "Cookie": "[identity:" + label + "]",
+                                                    "Authorization": "[identity:" + label + "]"},
+                                "request_body": (body or "")[:4000],
+                                "response_headers": res["response_headers"],
+                                "response_body": res["response_body"][:6000]})
                 fb = {k: res.get(k) for k in ("status_code", "duration_ms", "classification")}
                 fb["response_body"] = res["response_body"][:8000]
                 fb["note"] = ("IDOR/BOLA check: if this response (as " + label + ") returns another user's "
