@@ -161,7 +161,7 @@ export default function Page() {
   return (
     <>
       <div className="topbar">
-        <div className="logo">Recon<span>Hawk</span> <span style={{ fontSize: 10, color: "var(--muted)", fontWeight: 400 }}>v1.7.2</span></div>
+        <div className="logo">Recon<span>Hawk</span> <span style={{ fontSize: 10, color: "var(--muted)", fontWeight: 400 }}>v1.7.3</span></div>
         {navBtn("console", "Console")}
         {navBtn("knowledge", "Knowledge")}
         {navBtn("routines", "Routines")}

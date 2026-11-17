@@ -71,8 +71,15 @@ def url_in_patterns(url: str, patterns: list[str]) -> bool:
             continue
         try:
             target_port = target.port or (443 if target.scheme == 'https' else 80)
-            if '://' in raw and (rule.scheme != target.scheme or target_port != (rule.port or (443 if rule.scheme == 'https' else 80))):
-                continue
+            if '://' in raw:
+                # An http:// scope entry also permits https:// (a safe upgrade; bug-bounty
+                # scopes routinely list http:// loosely to mean the host). https stays strict.
+                scheme_ok = rule.scheme == target.scheme or (rule.scheme == 'http' and target.scheme == 'https')
+                if not scheme_ok:
+                    continue
+                # Only enforce an explicit, non-default port from the rule.
+                if rule.port is not None and rule.port != target_port:
+                    continue
             if '://' not in raw and rule.port is not None and rule.port != target_port:
                 continue
         except ValueError:
