@@ -167,6 +167,14 @@ export function SettingsModal({ onClose }: any) {
             <input value={cfg.hackerone_username} onChange={(e) => upd("hackerone_username", e.target.value)} /></div>
           <div className="field"><label>API token</label>
             <input type="password" value={cfg.hackerone_token} onChange={(e) => upd("hackerone_token", e.target.value)} /></div>
+          <div className="field"><label>Sync scopes on startup</label>
+            <select value={cfg.h1_auto_sync} onChange={(e) => upd("h1_auto_sync", e.target.value)}><option value="true">on</option><option value="false">off</option></select></div>
+          <div className="field"><label>Parallel scope requests (1–16)</label>
+            <input value={cfg.h1_sync_concurrency} onChange={(e) => upd("h1_sync_concurrency", e.target.value)} /></div>
+          <div className="field"><label>Requests per second (1–10)</label>
+            <input value={cfg.h1_requests_per_second} onChange={(e) => upd("h1_requests_per_second", e.target.value)} /></div>
+          <div className="field"><label>Refresh scopes older than (hours, 0 = always)</label>
+            <input value={cfg.h1_scope_ttl_hours} onChange={(e) => upd("h1_scope_ttl_hours", e.target.value)} /></div>
         </div>
 
         <h2 style={{ fontSize: 14, marginTop: 10 }}>Automation</h2>
@@ -480,6 +488,53 @@ export function WorkspacePanel({ taskId, refreshKey }: any) {
   );
 }
 
+/* ------------------------- One skill row: toggle · edit · delete ------------------------- */
+function SkillRow({ s, flash, reload }: any) {
+  const [editing, setEditing] = useState(false);
+  const [summary, setSummary] = useState(s.summary || "");
+  const [playbook, setPlaybook] = useState(s.playbook || "");
+  return (
+    <div className="timeline-item">
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <span><span className="kind-tag">{s.category}</span><strong>{s.name}</strong>
+          {s.is_custom && <span className="pill" style={{ marginLeft: 6 }}>custom</span>}</span>
+        <span className="row" style={{ gap: 4 }}>
+          <button onClick={async () => { await api.toggleSkill(s.name); reload(); }}
+            className={s.enabled ? "primary" : ""} style={{ fontSize: 10, padding: "2px 8px" }}>
+            {s.enabled ? "on" : "off"}
+          </button>
+          <button style={{ fontSize: 10, padding: "2px 6px" }}
+            onClick={() => { setSummary(s.summary || ""); setPlaybook(s.playbook || ""); setEditing(!editing); }}>
+            {editing ? "cancel" : "edit"}
+          </button>
+          <button className="danger" style={{ fontSize: 10, padding: "2px 6px" }}
+            onClick={async () => {
+              if (!confirm(`Delete skill "${s.name}"? Built-ins stay deleted across restarts.`)) return;
+              try { await api.deleteSkill(s.name); flash("deleted"); reload(); }
+              catch (e: any) { flash("delete failed: " + e.message); }
+            }}>×</button>
+        </span>
+      </div>
+      {editing ? (
+        <div style={{ marginTop: 6 }}>
+          <input aria-label="Skill summary" value={summary} onChange={(e) => setSummary(e.target.value)}
+            placeholder="summary" style={{ width: "100%", fontSize: 11, marginBottom: 4 }} />
+          <textarea aria-label="Skill playbook" value={playbook} onChange={(e) => setPlaybook(e.target.value)}
+            rows={8} style={{ width: "100%", fontSize: 11, fontFamily: "monospace" }} />
+          <button className="primary" style={{ fontSize: 10, marginTop: 4 }}
+            onClick={async () => {
+              try { await api.editSkill(s.name, { summary, playbook }); flash("saved"); setEditing(false); reload(); }
+              catch (e: any) { flash("save failed: " + e.message); }
+            }}>save</button>
+        </div>
+      ) : (
+        <details><summary className="muted" style={{ fontSize: 11, cursor: "pointer" }}>{s.summary}</summary>
+          <pre style={{ fontSize: 10, whiteSpace: "pre-wrap" }}>{s.playbook}</pre></details>
+      )}
+    </div>
+  );
+}
+
 /* ------------------------- Knowledge view (Memory · Skills · Pending Addenda) ------------------------- */
 export function KnowledgeView() {
   const [mem, setMem] = useState<any[]>([]);
@@ -589,22 +644,7 @@ export function KnowledgeView() {
           </h3>
           <div className="body">
             {skills.map((s) => (
-              <div key={s.name} className="timeline-item">
-                <div className="row" style={{ justifyContent: "space-between" }}>
-                  <span><span className="kind-tag">{s.category}</span><strong>{s.name}</strong>
-                    {s.is_custom && <span className="pill" style={{ marginLeft: 6 }}>custom</span>}</span>
-                  <span className="row">
-                    <button onClick={async () => { await api.toggleSkill(s.name); load(); }}
-                      className={s.enabled ? "primary" : ""} style={{ fontSize: 10, padding: "2px 8px" }}>
-                      {s.enabled ? "on" : "off"}
-                    </button>
-                    {s.is_custom && <button className="danger" style={{ fontSize: 10, padding: "2px 6px" }}
-                      onClick={async () => { await api.deleteSkill(s.name); load(); }}>×</button>}
-                  </span>
-                </div>
-                <details><summary className="muted" style={{ fontSize: 11, cursor: "pointer" }}>{s.summary}</summary>
-                  <pre style={{ fontSize: 10 }}>{s.playbook}</pre></details>
-              </div>
+              <SkillRow key={s.name} s={s} flash={flash} reload={load} />
             ))}
           </div>
         </div>

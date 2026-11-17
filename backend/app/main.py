@@ -41,9 +41,13 @@ async def lifespan(app: FastAPI):
     settings.scope_enforced=(await settings_store.get('scope_enforced'))=='true'
     async with SessionLocal() as session:
         await session.execute(update(Task).where(Task.status.in_(['running','queued'])).values(status='paused',stop_reason='service restarted'))
+        await session.execute(update(SubAgent).where(SubAgent.status.in_(['working','spawned'])).values(status='paused'))
         await session.commit()
     scheduler.start()
     telegram_bot.start()
+    # Refresh HackerOne programs and stale scopes in the background right away;
+    # the API is usable immediately and the UI shows progress via /sync_h1/status.
+    h1_sync.start_startup_sync()
     try:
         yield
     finally:
@@ -58,7 +62,7 @@ async def lifespan(app: FastAPI):
             await asyncio.gather(*pending,return_exceptions=True)
 
 
-app = FastAPI(title="ReconHawk API", version="1.7.1", lifespan=lifespan)
+app = FastAPI(title="ReconHawk API", version="1.7.2", lifespan=lifespan)
 @app.middleware('http')
 async def authenticate(request:Request,call_next):
     from .auth import allowed,origin_ok
@@ -260,13 +264,15 @@ async def sync_h1_programs():
             raise HTTPException(409, str(exc))
         cfg = await settings_store.get_all()
         try:
-            client = HackerOneClient(cfg.get("hackerone_username", ""), cfg.get("hackerone_token", ""), min_request_interval=1.3)
+            client = h1_sync.make_client(cfg)
         except HackerOneError as exc:
             raise HTTPException(400, str(exc))
         try:
             programs = await client.list_programs()
         except (HackerOneError, httpx.HTTPError) as exc:
             raise HTTPException(502, str(exc))
+        finally:
+            await h1_sync.close_client(client)
         summary = await h1_sync.import_programs(programs)
         handles = summary.pop("handles")
         job = await h1_sync.queue_scopes(handles) if handles else h1_sync.status()
@@ -440,7 +446,29 @@ async def task_subagents(tid: int):
     async with SessionLocal() as s:
         rows = (await s.execute(select(SubAgent).where(SubAgent.task_id == tid).order_by(desc(SubAgent.id)))).scalars().all()
         return [{"id": a.id, "name": a.name, "role": a.role, "status": a.status,
-                 "summary": a.summary, "created_at": a.created_at.isoformat()} for a in rows]
+                 "summary": a.summary, "coverage": json.loads(a.analysis_json or '{}'),
+                 "created_at": a.created_at.isoformat()} for a in rows]
+
+
+@app.get('/api/tasks/{tid}/analyses')
+async def task_analyses(tid: int):
+    from .tools import analysis_store
+    async with SessionLocal() as session:
+        if not await session.get(Task, tid):
+            raise HTTPException(404, 'Task not found')
+    return analysis_store.list_results(tid)
+
+
+@app.get('/api/tasks/{tid}/analyses/{analysis_id}')
+async def task_analysis_page(tid: int, analysis_id: str, section: str = 'request_shapes', offset: int = 0, limit: int = 20):
+    from .tools import analysis_store
+    async with SessionLocal() as session:
+        if not await session.get(Task, tid):
+            raise HTTPException(404, 'Task not found')
+    try:
+        return analysis_store.read(tid, analysis_id, section, offset, limit)
+    except FileNotFoundError:
+        raise HTTPException(404, 'Analysis not found in this task')
 
 
 @app.get("/api/tasks/{tid}/findings")
@@ -859,7 +887,8 @@ async def list_skills():
                  "tags": sk.tags, "source": sk.source} for sk in rows]
 
 
-@app.put("/api/skills/{name}/toggle")
+@app.post("/api/skills/toggle")
+@app.put("/api/skills/{name:path}/toggle")
 async def toggle_skill(name: str):
     async with SessionLocal() as s:
         sk = await s.get(Skill, name)
@@ -955,7 +984,8 @@ async def upload_skills(body: dict):
     return {"added": added, "replaced": replaced, "skipped": skipped, "names": names}
 
 
-@app.put("/api/skills/{name}")
+@app.put("/api/skills")
+@app.put("/api/skills/{name:path}")
 async def edit_skill(name: str, body: dict):
     async with SessionLocal() as s:
         sk = await s.get(Skill, name)
@@ -965,19 +995,26 @@ async def edit_skill(name: str, body: dict):
             sk.playbook = body["playbook"]
         if "summary" in body:
             sk.summary = body["summary"][:300]
+        if "category" in body and isinstance(body["category"], str) and body["category"].strip():
+            sk.category = body["category"].strip()[:60]
+        if "references_md" in body:
+            sk.references_md = body["references_md"]
         await s.commit()
         return {"name": sk.name, "ok": True}
 
 
-@app.delete("/api/skills/{name}")
+@app.delete("/api/skills")
+@app.delete("/api/skills/{name:path}")
 async def delete_skill(name: str):
     async with SessionLocal() as s:
         sk = await s.get(Skill, name)
         if not sk:
             raise HTTPException(404)
-        if not sk.is_custom:
-            raise HTTPException(400, "Built-in skills can't be deleted (toggle them off instead).")
         await s.delete(sk)
+        # Remember a deleted built-in so startup re-seeding does not resurrect it.
+        if not sk.is_custom:
+            from .skills_seed import mark_builtin_deleted
+            await mark_builtin_deleted(s, name)
         await s.commit()
     return {"ok": True}
 

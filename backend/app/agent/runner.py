@@ -17,7 +17,7 @@ from ..llm import build_llm
 from ..guard import policy
 from .. import redact
 from ..db import EndpointSpec
-from .prompts import SYSTEM_PROMPT, task_kickoff
+from .prompts import SYSTEM_PROMPT, task_kickoff, auth_testing_directive as prompts_auth_directive
 from .tools import TOOLS, WORKSPACE_TOOLS
 from sqlalchemy import select, desc
 
@@ -251,7 +251,16 @@ class AgentRun:
                 return json.dumps(res), False
 
             if name == "read_file":
-                return workspace.read_file(self.task_id, args["path"]), False
+                return json.dumps(workspace.read_page(self.task_id, args["path"], args.get('offset', 0), args.get('limit', 20000))), False
+
+            if name == 'list_analyses':
+                from ..tools import analysis_store
+                return json.dumps(analysis_store.list_results(self.task_id)), False
+
+            if name == 'read_analysis':
+                from ..tools import analysis_store
+                return json.dumps(analysis_store.read(self.task_id, args['analysis_id'], args.get('section', 'request_shapes'),
+                                                     args.get('offset', 0), args.get('limit', 20))), False
 
             if name == "run_command":
                 await bus.emit(self.task_id, "command", args["command"][:120], {"command": args["command"]})
@@ -286,29 +295,17 @@ class AgentRun:
                 return json.dumps(self.browser.recorded_requests()[:200]), False
 
             if name == "analyze_js":
-                source=await jsanalyze.fetch_js(args['url'])
-                res=jsanalyze.analyze(source)
-                from ..shapes import capture
-                res['request_shapes']=await capture(self.task_id,source,args['url'])
+                res = await jsanalyze.analyze_bundle(self.task_id, args['url'], args.get('include_chunks', True), should_stop=self.stop.is_set)
                 await bus.emit(self.task_id, "log",
-                               f"Analyzed JS ({res['endpoint_count']} endpoints) {args['url']}",
-                               {"url": args["url"], "interesting": res["interesting_endpoints"][:20],
-                                "secrets": res["possible_secrets"]})
-                if res["possible_secrets"]:
-                    await notify.push("warn", "Possible secret in JS",
-                                      f"{len(res['possible_secrets'])} candidate(s) in {args['url']}", self.task_id)
+                               f"JS analysis: {res['coverage']['file_status']} files · {res['totals']['request_shapes']} contracts", res)
                 return json.dumps(res), False
 
             if name == "analyze_source_map":
                 from ..tools import sourcemap
-                res = await sourcemap.analyze(self.task_id, args["url"])
+                res = await sourcemap.analyze(self.task_id, args["url"], should_stop=self.stop.is_set)
                 await bus.emit(self.task_id, "log",
-                               f"Source map: {res.get('files_recovered', 0)} src files, "
-                               f"{len(res.get('endpoints', []))} endpoints, "
-                               f"{len(res.get('request_shapes', []))} request shapes",
-                               {"url": args["url"], "auth_signals": res.get("auth_signals", []),
-                                "endpoints": res.get("endpoints", [])[:30]})
-                return json.dumps(res)[:12000], False
+                               f"Source map: {res['coverage']['status']} · {res['totals']['request_shapes']} contracts", res)
+                return json.dumps(res), False
 
             if name == "record_endpoint":
                 async with SessionLocal() as s:
@@ -470,10 +467,13 @@ class AgentRun:
                     spec=await session.get(EndpointSpec,int(args['spec_id']))
                 if not spec or spec.task_id!=self.task_id: return 'Spec not in scan.',True
                 shape=json.loads(spec.shape)
+                if shape.get('review_required') and not args.get('confirm_shape'):
+                    return 'Review inferred/alternative static contracts and set confirm_shape before probing.', True
                 body=args.get('body',shape.get('body'))
                 headers=args.get('headers',shape.get('headers',{}))
                 params=args.get('params',shape.get('params',{}))
                 if any(unresolved(v) for v in (body,headers,params)): return 'Supply unresolved values explicitly.',True
+                if not isinstance(headers, dict) or not isinstance(params, dict): return 'Supply headers and query params as explicit objects.', True
                 if spec.method not in ('GET','HEAD','OPTIONS') and not args.get('confirm_write'): return 'Write confirmation required.',True
                 if isinstance(body,(dict,list)):
                     body=json.dumps(body);headers={**headers,'Content-Type':'application/json'}
@@ -663,6 +663,15 @@ class AgentRun:
             skills_ctx = await knowledge.skills_context()
             if skills_ctx:
                 system += "\n\n=== LOADED SKILLS ===\n" + skills_ctx
+
+            # Authenticated testing is where IDOR/BOLA and access-control bugs live. When the
+            # operator has confirmed the program permits test accounts, make the agent provision
+            # the two identities it needs instead of skipping to an unauthenticated-only report.
+            # Every guard stays: operator opt-in, a hard cap, scope checks, and a HARD STOP on any
+            # CAPTCHA/OTP/verification (never bypassed).
+            provisioning_on = (await settings_store.get("allow_account_provisioning", "false")) == "true"
+            system += prompts_auth_directive(
+                provisioning_on, await settings_store.get("max_test_accounts", "2"))
             mem_ctx = await knowledge.memory_context(host, program_id)
             kickoff = task_kickoff(self.target, objective, self.scope_in, self.scope_out)
             if mem_ctx:
@@ -720,6 +729,9 @@ class AgentRun:
                            "while these remain. For each, either confirm it, disprove it, or record why "
                            "it's parked, then go deeper:\n- " + "\n- ".join(open_work[:25]))
             if not self.stop.is_set() and await self._open_work(): self.stop_reason='open work remains'
+            model_stop = getattr(llm, 'last_stop_reason', 'model_finished')
+            if not self.stop_reason and model_stop not in ('model_finished', 'unknown'):
+                self.stop_reason = 'model stopped: ' + model_stop
             status = 'paused' if self.stop_reason else ('stopped' if self.stop.is_set() else 'done')
         except Exception as e:  # noqa: BLE001
             status = "error"

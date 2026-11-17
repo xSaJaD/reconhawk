@@ -1,4 +1,63 @@
-# ReconHawk 1.7.1 validation
+# ReconHawk 1.7.2 validation
+
+Base: Claude branch commit `9e05ba4619c2bb1bd51ebb57558b88d1e36f2ba7`.
+
+- **186 backend tests passed.** New regressions cover complete files beyond the old
+  character limit, aliases/local wrappers, sparse webpack module IDs, lexical
+  shadowing, conditional/nested body fields, fetchConfig action creators, reducer
+  evidence, request variants, safe static inference, scoped task artifacts, JSON
+  paging, UTF-8 byte pages, large/inline/indexed maps, missing sources, limits,
+  specialist cancellation/iteration stops, full reports and read-only JS roles.
+  Deleting a built-in also preserves its deletion record while allowing Settings Save.
+- **Next.js production build and TypeScript passed.**
+- **Two production Chromium suites passed**, with all API/provider/H1/WebSocket
+  destinations mocked: the previous provider/program/scope checks, plus analysis
+  partial-state display, pages 0/10/20 through 25 contracts, warnings, full specialist
+  reports over 4,000 characters, and desktop/390px mobile layout. No JS page errors.
+- **Manual offline replay passed** against three previously retrieved JS assets
+  totaling **2,724,686 bytes**. Through the mocked static-file transport, the
+  pipeline read all three files, recovered all **nine requested endpoint paths**,
+  the ten signup body keys, nested metadata fields, login response-token usage,
+  and the browser Maps-key candidate. No parser/budget warnings occurred. Runtime
+  values stayed explicitly symbolic, so semantic coverage remained partial.
+  This is contract-recovery validation, not a vulnerability-detection benchmark.
+- **Real legacy-database upgrade smoke check passed.** A database created with
+  version 1.7.1 started under the new backend, gained the SubAgent coverage column,
+  preserved its report, marked interrupted specialists paused, and served the new
+  analyses API with HTTP 200.
+- Python compilation, shell syntax, whitespace and dependency-consistency checks
+  passed. Production npm audit reported **zero vulnerabilities** at validation time.
+
+No new target requests were made during these repairs; the replay used files
+retrieved earlier for the requested read-only JS review. No paid provider calls,
+HackerOne submissions or Telegram deliveries were performed.
+
+After setup, reproduce the backend/build checks from the root:
+
+```bash
+PYTHONPATH=backend backend/.venv/bin/python -m unittest discover -s backend/tests -v
+cd frontend
+npm run build
+npm audit --omit=dev
+```
+
+Run `npm run start -- --port 3135` from frontend, then in a second terminal at the
+repository root (build with the default `http://localhost:8000` API base):
+
+```bash
+UI_TEST_API=http://localhost:8000 backend/.venv/bin/python frontend/tests/ui_release.py
+UI_TEST_API=http://localhost:8000 backend/.venv/bin/python frontend/tests/ui_analysis.py
+```
+
+These browser tests need only the frontend; they mock the backend. Chromium must
+be installed. `UI_TEST_URL`, `UI_TEST_API` and `PLAYWRIGHT_BROWSERS_PATH` can select
+other local test URLs/browser locations. Screenshots default to the paths documented
+inside each script and can be overridden with their screenshot environment variables.
+
+See [the Arabic JS analysis guide](docs/JS_ANALYSIS_AR.md) for coverage semantics,
+supported inference, review gates and resource limits.
+
+## Historical 1.7.1 validation
 
 Validated against version 1.7, commit `3f7e6ac0654438d026b0e6e1209a01a7ecaf59fc`.
 

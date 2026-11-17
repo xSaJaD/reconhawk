@@ -71,19 +71,34 @@ class HackerOneClient:
         self.min_request_interval = min_request_interval
         self._last_request_at: float | None = None
         self._request_lock = asyncio.Lock()
+        # One pooled connection for the whole sync: no new TLS handshake per request.
+        self._http: httpx.AsyncClient | None = None
+
+    def _client(self) -> httpx.AsyncClient:
+        if self._http is None or self._http.is_closed:
+            self._http = httpx.AsyncClient(
+                timeout=30, limits=httpx.Limits(max_connections=16, max_keepalive_connections=16))
+        return self._http
+
+    async def aclose(self) -> None:
+        if self._http is not None and not self._http.is_closed:
+            await self._http.aclose()
 
     async def _get(self, path: str, params: dict | None = None) -> dict:
         # Pacing covers every page, not just the outer program-sync loop.
+        # Reserve the next start slot under the lock, then wait outside it: concurrent
+        # callers stay spaced by min_request_interval while their requests overlap.
         async with self._request_lock:
+            start = time.monotonic()
             if self._last_request_at is not None:
-                delay = self.min_request_interval - (time.monotonic() - self._last_request_at)
-                if delay > 0:
-                    await asyncio.sleep(delay)
-            self._last_request_at = time.monotonic()
-        async with httpx.AsyncClient(timeout=30) as c:
-            r = await c.get(BASE + path, auth=self._auth,
-                            headers={"Accept": "application/json"}, params=params)
-            return self._handle(r)
+                start = max(start, self._last_request_at + self.min_request_interval)
+            self._last_request_at = start
+        delay = start - time.monotonic()
+        if delay > 0:
+            await asyncio.sleep(delay)
+        r = await self._client().get(BASE + path, auth=self._auth,
+                                     headers={"Accept": "application/json"}, params=params)
+        return self._handle(r)
 
     async def _post(self, path: str, body: dict) -> dict:
         async with httpx.AsyncClient(timeout=30) as c:

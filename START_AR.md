@@ -1,6 +1,6 @@
-# تشغيل ReconHawk 1.7.1
+# تشغيل ReconHawk 1.7.2
 
-هذا تحديث للإصدار 1.7، مبني على الالتزام `3f7e6ac0654438d026b0e6e1209a01a7ecaf59fc`.
+هذا التحديث مبني على فرع كلود حتى الالتزام `9e05ba4619c2bb1bd51ebb57558b88d1e36f2ba7`، ويشمل أعمال 1.7 و1.7.1 السابقة.
 تفاصيل الإصلاحات في [CHANGELOG.md](CHANGELOG.md)، ونتائج مراجعة الوكلاء العشرة في
 [docs/AGENT_COMPETITION_AR.md](docs/AGENT_COMPETITION_AR.md).
 
@@ -39,22 +39,22 @@ curl --fail-with-body http://localhost:8000/api/health
 ## الترقية
 
 أوقف النسخة القديمة بـ Ctrl+C، وخذ نسخة احتياطية من `backend/data` و`backend/.env`
-قبل الترقية. إذا لديك مستودع Git فعلي ومجلد `.git`، استخدم الفرع `reconhawk-v1.7.1`.
+قبل الترقية. إذا لديك مستودع Git فعلي ومجلد `.git`، استخدم الفرع `reconhawk-v1.7.2`.
 إذا نزّلت ZIP فلا يعمل `git fetch` داخل مجلد مفكوك بلا `.git`.
 
 لتثبيت نظيف في مجلد مستقل على Kali:
 
 ```bash
 cd /home/sajo/Downloads
-git clone --branch reconhawk-v1.7.1 --single-branch https://github.com/xSaJaD/reconhawk.git reconhawk-1.7.1
-cd reconhawk-1.7.1
+git clone --branch reconhawk-v1.7.2 --single-branch https://github.com/xSaJaD/reconhawk.git reconhawk-1.7.2
+cd reconhawk-1.7.2
 chmod +x setup.sh run.sh
 ./setup.sh
 ./run.sh
 ```
 
-البديل تنزيل `releases/reconhawk-1.7.1.zip` من الفرع نفسه وفكّه في مجلد جديد؛ جميع
-ملفات المصدر ضمن المجلد `reconhawk-1.7.1/`. لا تعيد استخدام مسار موجود دون مراجعة.
+البديل تنزيل `releases/reconhawk-1.7.2.zip` من الفرع نفسه وفكّه في مجلد جديد؛ جميع
+ملفات المصدر ضمن المجلد `reconhawk-1.7.2/`. لا تعيد استخدام مسار موجود دون مراجعة.
 
 لنقل إعدادات ونتائج النسخة القديمة: بعد إيقافها وقبل تشغيل النسخة الجديدة، انسخ
 `backend/data` و`backend/.env` القديمين إلى المسارين المناظرين في النسخة الجديدة.
@@ -102,6 +102,10 @@ MCP مغلق افتراضياً. فعّله في Settings وحدد الخواد�
 شبكة خادم خارجي. اختبر الاتصال من تبويب Tools.
 
 ## الاختبارات
+
+شرح تحليل JavaScript والتغطية والحدود في [docs/JS_ANALYSIS_AR.md](docs/JS_ANALYSIS_AR.md).
+تُحفظ المصادر والنتائج داخل مساحة المهمة، وتظهر في Assets ضمن API request shapes مع صفحات قراءة كاملة.
+الحالة partial تعني وجود حد أو خطأ أو قيم وقت تشغيل لم تُحسم؛ لا تحوّلها إلى ادعاء اكتمال.
 
 ```bash
 PYTHONPATH=backend backend/.venv/bin/python -m unittest discover -s backend/tests -v

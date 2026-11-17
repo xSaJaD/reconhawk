@@ -94,9 +94,11 @@ class OpenAICompatLLM:
             messages.insert(0,{'role':'system','content':system})
             messages.append({'role':'user','content':'Resume with current policy and persisted context. '+kickoff})
         final_text = ""
+        self.last_stop_reason = 'iteration_limit'
         previous_effort = None
         for _ in range(max_iterations):
             if should_stop():
+                self.last_stop_reason = 'stopped'
                 break
             if inbox:
                 for msg in inbox():
@@ -134,6 +136,7 @@ class OpenAICompatLLM:
             })
 
             if not tool_calls:
+                self.last_stop_reason = 'model_finished' if getattr(resp.choices[0], 'finish_reason', 'stop') == 'stop' else str(resp.choices[0].finish_reason)
                 if on_checkpoint: await on_checkpoint(messages)
                 break
 
