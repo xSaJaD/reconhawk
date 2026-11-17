@@ -1,2 +1,2 @@
 /** @type {import('next').NextConfig} */
-module.exports = { reactStrictMode: true };
+module.exports = { reactStrictMode: true, allowedDevOrigins:['127.0.0.1'], agentRules:false };

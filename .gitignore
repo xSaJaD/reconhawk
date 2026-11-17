@@ -12,6 +12,6 @@ frontend/.env.local
 # misc
 *.log
 
-# TS incremental build info
-frontend/tsconfig.tsbuildinfo
+work/
 *.tsbuildinfo
+backend/data/*.db-*

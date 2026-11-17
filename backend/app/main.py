@@ -7,9 +7,11 @@ import os
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+import httpx
+
+from fastapi import Request, Response, FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import select, desc, update, func
 
@@ -20,11 +22,13 @@ from .db import (
 )
 from .events import bus
 from .scope import check_url, load_scope, ScopeError
+from .guard import policy
 from .agent.runner import start_task, request_stop
 from .tools import http_client
 from .llm import PROVIDERS, build_llm
 from . import settings_store, chat, scheduler, notify, verify, reporting, telegram_bot, skills_seed, knowledge
 from .integrations.hackerone import HackerOneClient, HackerOneError, normalize_scopes
+from . import h1_sync
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -32,14 +36,57 @@ async def lifespan(app: FastAPI):
     db_path = settings.database_url.split("///")[-1]
     os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
     await init_db()
+    await h1_sync.recover_interrupted()
     await skills_seed.seed_skills()
+    settings.scope_enforced=(await settings_store.get('scope_enforced'))=='true'
+    async with SessionLocal() as session:
+        await session.execute(update(Task).where(Task.status.in_(['running','queued'])).values(status='paused',stop_reason='service restarted'))
+        await session.commit()
     scheduler.start()
     telegram_bot.start()
-    yield
+    # Refresh HackerOne programs and stale scopes in the background right away;
+    # the API is usable immediately and the UI shows progress via /sync_h1/status.
+    h1_sync.start_startup_sync()
+    try:
+        yield
+    finally:
+        await h1_sync.stop()
+        await scheduler.stop()
+        from .agent.runner import ACTIVE
+        workers=list(ACTIVE.values())
+        for tid in list(ACTIVE): request_stop(tid)
+        if workers:
+            done,pending=await asyncio.wait(workers,timeout=10)
+            for t in pending: t.cancel()
+            await asyncio.gather(*pending,return_exceptions=True)
 
 
-app = FastAPI(title="ReconHawk API", version="0.3.0", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app = FastAPI(title="ReconHawk API", version="1.7.1", lifespan=lifespan)
+@app.middleware('http')
+async def authenticate(request:Request,call_next):
+    from .auth import allowed,origin_ok
+    if request.method=='OPTIONS' or (request.url.path=='/api/session' and request.method=='POST' and origin_ok(request)):
+        return await call_next(request)
+    if not allowed(request): return JSONResponse({'detail':'Authentication required'},status_code=401)
+    return await call_next(request)
+
+app.add_middleware(CORSMiddleware,allow_origins=settings.cors_origins.split(','),allow_credentials=True,allow_methods=['GET','POST','PUT','DELETE'],allow_headers=['Content-Type','Authorization'])
+
+@app.exception_handler(ValueError)
+async def invalid_value(request,exc):
+    return JSONResponse({'detail':str(exc)},status_code=400)
+
+@app.post('/api/session')
+async def login(body:dict,request:Request,response:Response):
+    import hmac
+    if not settings.api_token or not hmac.compare_digest(str(body.get('token','')),settings.api_token): raise HTTPException(401)
+    response.set_cookie('reconhawk_session',settings.api_token,httponly=True,samesite='strict',secure=request.url.scheme=='https',max_age=43200)
+    return {'ok':True}
+
+@app.delete('/api/session')
+async def logout(response:Response):
+    response.delete_cookie('reconhawk_session')
+    return {'ok':True}
 
 
 # ---------- schemas ----------
@@ -50,7 +97,7 @@ class ProgramIn(BaseModel):
     policy: str | None = None
     scope_in: list[str] = []
     scope_out: list[str] = []
-    program_type: str = "bbp"  # bbp|bounty|vdp
+    program_type: str = "unknown"  # bounty|vdp|unknown; legacy bbp remains readable
     icon_url: str = ""
 
 
@@ -60,6 +107,7 @@ class TaskIn(BaseModel):
     program_id: int | None = None
     provider: str | None = None
     model: str | None = None
+    effort: str = ''
 
 
 class RepeaterIn(BaseModel):
@@ -99,8 +147,17 @@ def _prog_dict(p: Program) -> dict:
     return {"id": p.id, "name": p.name, "platform": p.platform, "handle": p.handle,
             "policy": p.policy, "scope_in": json.loads(p.scope_in or "[]"),
             "scope_out": json.loads(p.scope_out or "[]"),
-            "program_type": getattr(p, "program_type", "bbp") or "bbp",
+            "program_type": getattr(p, "program_type", "unknown") or "unknown",
             "icon_url": getattr(p, "icon_url", "") or "",
+            "scope_assets": json.loads(p.scope_assets_json or "[]"),
+            "scope_sync": {
+                "status": p.scope_sync_status or "never", "error": p.scope_sync_error or "",
+                "warnings": json.loads(p.scope_sync_warnings or "[]"),
+                "started_at": h1_sync.timestamp(p.scope_sync_started_at),
+                "synced_at": h1_sync.timestamp(p.scope_synced_at),
+                "asset_count": p.scope_asset_count or 0, "web_asset_count": p.scope_web_asset_count or 0,
+                "attempts": p.scope_sync_attempts or 0,
+            },
             "created_at": p.created_at.isoformat()}
 
 
@@ -190,87 +247,58 @@ async def update_program(pid: int, body: ProgramIn):
 
 
 async def _enrich_h1_scopes(handles: list[str]) -> None:
-    """Background: fetch each program's structured scope and update it. Paced to respect
-    HackerOne's 50/min structured-scopes rate limit; stops gracefully on rate-limit errors."""
-    cfg = await settings_store.get_all()
-    try:
-        client = HackerOneClient(cfg.get("hackerone_username", ""), cfg.get("hackerone_token", ""))
-    except HackerOneError:
-        return
-    done = 0
-    for handle in handles:
-        try:
-            scopes = await client.get_scopes(handle)
-        except HackerOneError as e:
-            if "429" in str(e):
-                break  # hit the rate limit — stop; a later sync continues
-            continue
-        except Exception:
-            continue
-        scope_in, scope_out = normalize_scopes(scopes)
-        async with SessionLocal() as s:
-            row = (await s.execute(select(Program).where(Program.handle == handle))).scalars().first()
-            if row:
-                new_hash = _scope_hash(scope_in, scope_out)
-                if row.scope_hash and row.scope_hash != new_hash:
-                    await notify.push("warn", f"Scope changed · {row.name}",
-                                      "HackerOne scope updated — review new assets.", None)
-                row.scope_in = json.dumps(scope_in)
-                row.scope_out = json.dumps(scope_out)
-                row.scope_hash = new_hash
-                await s.commit()
-        done += 1
-        await asyncio.sleep(1.3)  # ~46/min, under the 50/min cap
-    await notify.push("success", "HackerOne scope sync complete",
-                      f"Fetched scope for {done}/{len(handles)} program(s).", None)
+    """Compatibility wrapper around the observable sync service."""
+    await h1_sync.sync_scopes(handles)
 
 
 @app.post("/api/programs/sync_h1")
 async def sync_h1_programs():
-    """Pull the hacker's HackerOne programs into ReconHawk. Returns immediately with the
-    program list + policy; structured scopes are fetched in the background (rate-limited)."""
-    cfg = await settings_store.get_all()
-    try:
-        client = HackerOneClient(cfg.get("hackerone_username", ""), cfg.get("hackerone_token", ""))
-    except HackerOneError as e:
-        raise HTTPException(400, str(e))
-    try:
-        progs = await client.list_programs()
-    except HackerOneError as e:
-        raise HTTPException(502, str(e))
+    """Import program metadata, then queue a paced, visible scope refresh."""
+    if h1_sync.IMPORT_LOCK.locked() or h1_sync.running():
+        raise HTTPException(409, "A HackerOne sync is already running; inspect its status first.")
+    async with h1_sync.IMPORT_LOCK:
+        try:
+            h1_sync.ensure_available()
+        except h1_sync.SyncBusy as exc:
+            raise HTTPException(409, str(exc))
+        cfg = await settings_store.get_all()
+        try:
+            client = h1_sync.make_client(cfg)
+        except HackerOneError as exc:
+            raise HTTPException(400, str(exc))
+        try:
+            programs = await client.list_programs()
+        except (HackerOneError, httpx.HTTPError) as exc:
+            raise HTTPException(502, str(exc))
+        finally:
+            await h1_sync.close_client(client)
+        summary = await h1_sync.import_programs(programs)
+        handles = summary.pop("handles")
+        job = await h1_sync.queue_scopes(handles) if handles else h1_sync.status()
+        return {**summary, "scopes": "queued" if handles else "no programs", "sync": job}
 
-    added, updated, handles = 0, 0, []
-    async with SessionLocal() as s:
-        existing = {p.handle: p for p in (await s.execute(select(Program))).scalars().all() if p.handle}
-        for pr in progs:
-            attrs = pr.get("attributes", {})
-            handle = attrs.get("handle")
-            if not handle:
-                continue
-            handles.append(handle)
-            ptype = "bbp" if attrs.get("offers_bounties") else "vdp"
-            icon = attrs.get("profile_picture") or ""
-            if isinstance(icon, dict):  # H1 sometimes returns a size map
-                icon = icon.get("medium") or icon.get("small") or next(iter(icon.values()), "")
-            row = existing.get(handle)
-            if row is None:
-                s.add(Program(name=attrs.get("name", handle), platform="hackerone", handle=handle,
-                              policy=attrs.get("policy", ""), scope_in="[]", scope_out="[]", scope_hash="",
-                              program_type=ptype, icon_url=icon))
-                added += 1
-            else:
-                row.name = attrs.get("name", handle)
-                row.policy = attrs.get("policy", "")
-                row.program_type = ptype
-                if icon:
-                    row.icon_url = icon
-                updated += 1
-        await s.commit()
 
-    # Enrich scopes without blocking the response.
-    if handles:
-        asyncio.create_task(_enrich_h1_scopes(handles))
-    return {"added": added, "updated": updated, "total": len(handles), "scopes": "fetching in background"}
+@app.get("/api/programs/sync_h1/status")
+async def h1_sync_status():
+    return {**h1_sync.status(), "importing": h1_sync.IMPORT_LOCK.locked()}
+
+
+@app.post("/api/programs/{pid}/sync_scope")
+async def retry_h1_scope(pid: int):
+    if h1_sync.IMPORT_LOCK.locked():
+        raise HTTPException(409, "Program import is still running.")
+    async with h1_sync.IMPORT_LOCK:
+        async with SessionLocal() as session:
+            program = await session.get(Program, pid)
+            if not program:
+                raise HTTPException(404, "Program not found")
+            if program.platform != "hackerone" or not program.handle:
+                raise HTTPException(400, "Scope refresh is available for HackerOne programs only.")
+            handle = program.handle
+        try:
+            return await h1_sync.queue_scopes([handle])
+        except h1_sync.SyncBusy as exc:
+            raise HTTPException(409, str(exc))
 
 
 @app.post("/api/programs/{pid}/scan")
@@ -324,6 +352,7 @@ async def list_tasks():
 async def create_task(body: TaskIn):
     async with SessionLocal() as s:
         program = await s.get(Program, body.program_id) if body.program_id else None
+        if body.program_id and not program: raise HTTPException(404,"Program not found")
         si, so = load_scope(program)
         try:
             check_url(body.target, si, so)
@@ -335,7 +364,7 @@ async def create_task(body: TaskIn):
                                 detail=f"No API key set for provider '{prov}'. "
                                        "Open ⚙ Settings, add a key, and Test connection.")
         t = Task(target=body.target, objective=body.objective, program_id=body.program_id,
-                 provider=body.provider or "", model=body.model or "")
+                 provider=body.provider or "", model=body.model or "", effort=body.effort)
         s.add(t)
         await s.commit()
         await s.refresh(t)
@@ -364,14 +393,16 @@ async def stop_task(tid: int):
 async def delete_task(tid: int):
     """Delete a task and all its child rows (stops it first if running)."""
     request_stop(tid)
+    from .agent.runner import ACTIVE
+    if tid in ACTIVE: raise HTTPException(409,'Scan is stopping; retry after it stops')
     from sqlalchemy import delete as sqldelete
-    from .db import (Idea, GraphNode, GraphEdge, Asset, TokenUsage, Memory)
+    from .db import (Idea, GraphNode, GraphEdge, Asset, TokenUsage, Memory, EndpointSpec)
     async with SessionLocal() as s:
         t = await s.get(Task, tid)
         if not t:
             raise HTTPException(404)
         for model in (Event, Endpoint, Finding, Lead, SubAgent, RepeaterRequest, Intel,
-                      Idea, GraphNode, GraphEdge, Asset, TokenUsage):
+                      Idea, GraphNode, GraphEdge, Asset, TokenUsage, EndpointSpec):
             await s.execute(sqldelete(model).where(model.task_id == tid))
         # addenda reference findings of this task — clear by task_id too
         await s.execute(sqldelete(Addendum).where(Addendum.task_id == tid))
@@ -387,7 +418,8 @@ async def task_events(tid: int, kind: str | None = None, limit: int = 1000):
         q = select(Event).where(Event.task_id == tid)
         if kind:
             q = q.where(Event.kind == kind)
-        rows = (await s.execute(q.order_by(Event.id).limit(limit))).scalars().all()
+        rows = (await s.execute(q.order_by(desc(Event.id)).limit(max(1,min(limit,5000))))).scalars().all()
+        rows=list(reversed(rows))
         return [{"id": e.id, "kind": e.kind, "title": e.title, "body": e.body,
                  "created_at": e.created_at.isoformat()} for e in rows]
 
@@ -426,7 +458,7 @@ async def task_findings(tid: int):
 def _finding_dict(f: Finding) -> dict:
     return {"id": f.id, "task_id": f.task_id, "title": f.title, "severity": f.severity, "status": f.status,
             "summary": f.summary, "report_md": f.report_md, "relation": f.relation,
-            "related_to": f.related_to, "confidence": f.confidence, "verified": f.verified,
+            "related_to": f.related_to, "evidence_ids": json.loads(f.evidence_ids or "[]"), "confidence": f.confidence, "verified": f.verified,
             "evidence_score": f.evidence_score, "verdict": f.verdict, "weakness": f.weakness,
             "h1_report_id": f.h1_report_id,
             "h1_report_url": f.h1_report_url,
@@ -551,13 +583,17 @@ async def repeater_send(body: RepeaterIn):
     if body.task_id:
         async with SessionLocal() as s:
             t = await s.get(Task, body.task_id)
-            program = await s.get(Program, t.program_id) if t and t.program_id else None
+            if not t: raise HTTPException(404)
+            program = await s.get(Program, t.program_id) if t.program_id else None
             si, so = load_scope(program)
     try:
         check_url(body.url, si, so)
     except ScopeError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    res = await http_client.send_request(body.method, body.url, headers=body.headers, body=body.body)
+    token=policy.set((si,so))
+    try:
+        res = await http_client.send_request(body.method, body.url, headers=body.headers, body=body.body)
+    finally: policy.reset(token)
     async with SessionLocal() as s:
         rr = RepeaterRequest(task_id=body.task_id, method=body.method.upper(), url=body.url,
                              request_headers=json.dumps(body.headers), request_body=body.body,
@@ -740,7 +776,7 @@ async def task_overview(tid: int):
         "pending_addenda": pending_add,
         "files": len(files),
         "cost": {"tokens_in": t.tokens_in or 0, "tokens_out": t.tokens_out or 0,
-                 "usd": round(t.cost_usd or 0, 4), "steps": t.steps or 0, "budget_usd": budget},
+                 "price_unknown": t.unknown_price, "usd": round(t.cost_usd or 0, 6), "steps": t.steps or 0, "budget_usd": budget},
     }
 
 
@@ -830,7 +866,7 @@ async def list_skills():
 
 @app.put("/api/skills/toggle")
 async def toggle_skill(name: str):
-    # name is a query param (skill names can contain '/' which breaks path routing)
+    # name is a query param: skill names can contain '/' which breaks path routing.
     async with SessionLocal() as s:
         sk = await s.get(Skill, name)
         if not sk:
@@ -936,6 +972,10 @@ async def edit_skill(name: str, body: dict):
             sk.playbook = body["playbook"]
         if "summary" in body:
             sk.summary = body["summary"][:300]
+        if "category" in body and isinstance(body["category"], str) and body["category"].strip():
+            sk.category = body["category"].strip()[:60]
+        if "references_md" in body:
+            sk.references_md = body["references_md"]
         await s.commit()
         return {"name": sk.name, "ok": True}
 
@@ -947,9 +987,11 @@ async def delete_skill(name: str):
         sk = await s.get(Skill, name)
         if not sk:
             raise HTTPException(404)
-        if not sk.is_custom:
-            raise HTTPException(400, "Built-in skills can't be deleted (toggle them off instead).")
         await s.delete(sk)
+        # Remember a deleted built-in so startup re-seeding does not resurrect it.
+        if not sk.is_custom:
+            from .skills_seed import mark_builtin_deleted
+            await mark_builtin_deleted(s, name)
         await s.commit()
     return {"ok": True}
 
@@ -1076,15 +1118,20 @@ async def edit_addendum(aid: int, body: dict):
 # ---------- live stream ----------
 @app.websocket("/ws")
 async def ws(websocket: WebSocket):
+    from .auth import allowed
+    if not allowed(websocket): await websocket.close(code=1008);return
     await websocket.accept()
     q = bus.subscribe()
+    async def send():
+        while True: await websocket.send_json(await q.get())
+    async def receive():
+        while True: await websocket.receive_text()
+    tasks=[asyncio.create_task(send()),asyncio.create_task(receive())]
     try:
-        while True:
-            payload = await q.get()
-            await websocket.send_text(json.dumps(payload, default=str))
-    except WebSocketDisconnect:
-        pass
+        await asyncio.wait(tasks,return_when=asyncio.FIRST_COMPLETED)
     finally:
+        for task in tasks: task.cancel()
+        await asyncio.gather(*tasks,return_exceptions=True)
         bus.unsubscribe(q)
 
 
@@ -1105,5 +1152,69 @@ async def health():
             "has_key": await settings_store.provider_has_key(cfg["provider"]),
             "scope_enforced": settings.scope_enforced,
             "shell": shell_on,
-            "tools": recon_tools.detect()["installed_count"],
+            "tools": len(__import__("app.agent.tools",fromlist=["TOOLS"]).TOOLS)+2+int(shell_on),
             "skills": skills or 0}
+
+@app.post('/api/tasks/{tid}/resume')
+async def resume(tid:int):
+    from .agent.runner import ACTIVE
+    if tid in ACTIVE: raise HTTPException(409,'Already active')
+    async with SessionLocal() as session:
+        t=await session.get(Task,tid)
+        if not t: raise HTTPException(404)
+        if t.status in ('queued','running'): raise HTTPException(409)
+        p=await session.get(Program,t.program_id) if t.program_id else None
+        check_url(t.target,*load_scope(p))
+        result=await session.execute(update(Task).where(Task.id==tid,Task.status==t.status).values(status='queued',finished_at=None,stop_reason=''))
+        if result.rowcount!=1: raise HTTPException(409)
+        await session.commit()
+    asyncio.create_task(start_task(tid))
+    return {'ok':True}
+
+@app.post('/api/tasks/{tid}/effort')
+async def effort(tid:int,body:dict):
+    from .agent.runner import RUNS
+    value=body.get('effort','high')
+    if value not in ('low','medium','high','xhigh','max'): raise HTTPException(400)
+    async with SessionLocal() as session:
+        t=await session.get(Task,tid)
+        if not t: raise HTTPException(404)
+        t.effort=value;await session.commit()
+    if tid in RUNS: RUNS[tid].effort=value
+    return {'ok':True}
+
+@app.get('/api/tasks/{tid}/specs')
+async def specs(tid:int):
+    from .db import EndpointSpec
+    async with SessionLocal() as session:
+        rows=(await session.execute(select(EndpointSpec).where(EndpointSpec.task_id==tid))).scalars().all()
+    return [{'id':r.id,'url':r.url,'method':r.method,'shape':json.loads(r.shape)} for r in rows]
+
+@app.put('/api/findings/{fid}/evidence')
+async def link_evidence(fid:int,body:dict):
+    async with SessionLocal() as session:
+        f=await session.get(Finding,fid)
+        if not f: raise HTTPException(404)
+        ids=list(dict.fromkeys(int(i) for i in body.get('evidence_ids',[])))
+        if len(ids)>20: raise HTTPException(400)
+        for rid in ids:
+            r=await session.get(RepeaterRequest,rid)
+            if not r or r.task_id!=f.task_id: raise HTTPException(400,'Evidence must belong to this scan')
+        f.evidence_ids=json.dumps(ids);f.verified=False;f.confidence=0;f.evidence_score=0
+        f.verification_revision = (f.verification_revision or 0) + 1
+        await session.commit()
+    return {'ok':True}
+
+@app.get('/api/mcp/servers')
+async def mcp_status():
+    from .mcp_client import STATUS
+    return STATUS
+
+@app.post('/api/mcp/test')
+async def mcp_test():
+    from .mcp_client import Manager
+    manager=Manager()
+    try:
+        await manager.connect(await settings_store.get_all())
+        return {'tools':manager.tools}
+    finally: await manager.close()

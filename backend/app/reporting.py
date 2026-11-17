@@ -41,6 +41,7 @@ async def submit_finding(finding_id: int) -> dict:
     if f.h1_report_id:
         return {"already": True, "id": f.h1_report_id, "url": f.h1_report_url}
 
+    if not f.verified: raise ValueError('Verify linked evidence before submission')
     payload = build_report_payload(f, program)
     if not payload["team_handle"]:
         raise HackerOneError("No HackerOne program handle on this scan's program. "

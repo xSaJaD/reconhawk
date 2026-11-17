@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from sqlalchemy import select
+import json
 
 from .config import settings as env
 from .db import SessionLocal, Setting
@@ -14,7 +15,7 @@ DEFAULTS = {
     "llm_provider": "anthropic",
     "llm_model": env.agent_model,
     "llm_effort": env.agent_effort,
-    "agent_max_iterations": str(env.agent_max_iterations),
+    "agent_max_iterations": str(max(env.agent_max_iterations, 60)),
     "anthropic_api_key": env.anthropic_api_key,
     "openai_api_key": "",
     "openai_base_url": "https://api.openai.com/v1",
@@ -27,6 +28,12 @@ DEFAULTS = {
     "telegram_chat_id": "",
     "hackerone_username": "",
     "hackerone_token": "",
+    # HackerOne scope sync: start in the background when the service starts, refresh only
+    # stale programs, and fetch several programs at once within the API rate limit.
+    "h1_auto_sync": "true",
+    "h1_sync_concurrency": "6",
+    "h1_requests_per_second": "8",
+    "h1_scope_ttl_hours": "12",
     "verify_threshold": "80",
     "auto_verify": "true",
     "auto_telegram": "true",
@@ -40,9 +47,13 @@ DEFAULTS = {
     "budget_usd_per_task": "0",
     "max_subagents": "4",
     "subagent_max_iterations": "14",
-    "max_passes": "3",  # continuation passes while open leads/ideas remain
+    "max_steps_per_task": "400",
+    "enable_mcp": "false",
+    "mcp_servers": "[]",
+    "accent_color": "#39d98a",
+    "max_passes": "5",  # continuation passes while open leads/ideas remain
     # authenticated testing — account provisioning is OFF by default and hard-capped
-    "allow_account_provisioning": "false",
+    "allow_account_provisioning": "true",
     "max_test_accounts": "2",
 }
 
@@ -69,6 +80,19 @@ async def get(key: str, default: str = "") -> str:
 
 
 async def set_many(values: dict) -> None:
+    limits={'agent_max_iterations':(1,500),'max_steps_per_task':(0,10000),'max_subagents':(0,8),'subagent_max_iterations':(1,100),'max_passes':(1,20),'max_test_accounts':(0,2),'budget_usd_per_task':(0,100000),'verify_threshold':(1,100),'h1_sync_concurrency':(1,16),'h1_requests_per_second':(1,10),'h1_scope_ttl_hours':(0,168)}
+    for key,value in values.items():
+        if key not in DEFAULTS: raise ValueError('Unknown setting: '+key)
+        if key in limits:
+            number=float(value) if key=='budget_usd_per_task' else int(value)
+            if not limits[key][0]<=number<=limits[key][1]: raise ValueError('Invalid limit: '+key)
+        if DEFAULTS[key] in ('true','false') and str(value) not in ('true','false'): raise ValueError('Invalid boolean')
+        if key in ('llm_provider', 'worker_provider') and value not in ('anthropic', 'openai', 'openrouter', 'custom'):
+            if not (key == 'worker_provider' and value == ''):
+                raise ValueError('Unsupported provider')
+        if key=='mcp_servers':
+            from .mcp_client import validate
+            validate(json.loads(value))
     async with SessionLocal() as s:
         for k, v in values.items():
             # Skip masked secret values the UI echoes back unchanged.
@@ -80,6 +104,7 @@ async def set_many(values: dict) -> None:
             else:
                 row.value = str(v)
         await s.commit()
+    if 'scope_enforced' in values: env.scope_enforced=str(values['scope_enforced'])=='true'
 
 
 async def provider_has_key(provider: str | None = None) -> bool:

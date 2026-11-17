@@ -18,6 +18,8 @@ def host_of(url: str) -> str:
 async def remember(content: str, category: str = "note", scope: str = "global",
                    task_id: int | None = None) -> int:
     async with SessionLocal() as s:
+        old=(await s.execute(select(Memory).where(Memory.scope==scope,Memory.category==category,Memory.content==content))).scalars().first()
+        if old: return old.id
         m = Memory(content=content, category=category, scope=scope, task_id=task_id)
         s.add(m)
         await s.commit()
@@ -102,7 +104,7 @@ async def skills_context() -> str:
     skills = await enabled_skills()
     if not skills:
         return (
-            "No testing skills are loaded. Your coverage is limited to generic recon. "
+            "No testing skills are loaded, so your coverage is limited to generic recon. "
             "Tell the operator that adding skills (Knowledge → Skills) will make the scan "
             "deeper and more targeted."
         )
@@ -119,17 +121,18 @@ async def skills_context() -> str:
         f"\nLoaded skills: {names}",
     ]
     for sk in skills:
-        lines.append(f"\n## {sk.name}  ·  [{sk.category}]")
+        parts = [f"\n## {sk.name}  ·  [{sk.category}]"]
         if sk.summary:
-            lines.append(f"_{sk.summary}_")
+            parts.append(f"_{sk.summary}_")
         if sk.playbook:
-            lines.append(f"\n**Playbook / steps:**\n{sk.playbook}")
-        if (sk.payloads_json or "").strip():
-            lines.append(f"\n**Payloads to try (use these exact values, adapt to the endpoint):**\n{sk.payloads_json}")
-        if (sk.bypass_table_md or "").strip():
-            lines.append(f"\n**Bypass / evasion techniques:**\n{sk.bypass_table_md}")
-        if (sk.references_md or "").strip():
-            lines.append(f"\n**References:**\n{sk.references_md}")
+            parts.append(f"**Playbook / steps:**\n{sk.playbook}")
+        if sk.payloads_json and sk.payloads_json.strip():
+            parts.append(f"**Payloads (use these exact values, adapt to the endpoint):**\n{sk.payloads_json.strip()}")
+        if sk.bypass_table_md and sk.bypass_table_md.strip():
+            parts.append(f"**Bypass / evasion techniques:**\n{sk.bypass_table_md.strip()}")
+        if sk.references_md and sk.references_md.strip():
+            parts.append(f"**References:**\n{sk.references_md.strip()}")
+        lines.append("\n".join(parts))
     return "\n".join(lines)
 
 

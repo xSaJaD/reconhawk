@@ -83,7 +83,7 @@ pre { white-space: pre-wrap; word-break: break-word; background: var(--panel2);
   border: 1px solid var(--border); border-radius: 6px; padding: 10px; font-size: 11px;
   font-family: var(--mono); max-height: 240px; overflow: auto; }
 .empty { color: var(--muted); font-size: 12px; padding: 20px 0; text-align: center; }
-/* Expandable timeline request/response detail */
+/* Expandable Activity request/response detail */
 .timeline-item.expandable > div:first-child:hover { color: #fff; }
 .tl-caret { color: var(--muted); margin-right: 4px; font-size: 10px; }
 .st-pill { display: inline-block; font-family: var(--mono); font-size: 10px; font-weight: 700;
@@ -94,8 +94,18 @@ pre { white-space: pre-wrap; word-break: break-word; background: var(--panel2);
 .st-5xx { background: #3a1216; color: var(--crit); }
 .req-detail { margin: 6px 0 4px 14px; border-left: 2px solid var(--border); padding-left: 10px; }
 .req-section-label { font-size: 9px; letter-spacing: .06em; text-transform: uppercase;
-  color: var(--accent2); margin: 6px 0 3px; font-weight: 700; }
+  color: var(--accent2, #4aa8ff); margin: 6px 0 3px; font-weight: 700; }
 .req-block { margin: 0 0 6px; font-size: 11px; max-height: 200px; }
 .req-block.resp-body { max-height: 320px; color: var(--text); }
 .dot { width: 8px; height: 8px; border-radius: 99px; display: inline-block; }
 .dot.on { background: var(--accent); } .dot.off { background: var(--crit); }
+
+.session-tabs{display:flex;gap:6px;flex-wrap:wrap;margin:12px 0 18px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+.scope-status{font-size:11px;margin-top:6px;line-height:1.5;overflow-wrap:anywhere}
+.scope-status button{font-size:10px;padding:2px 6px;margin-left:5px}
+.scope-status>.muted,.scope-status>[role="alert"]{margin-top:3px}
+.connection-error{padding:12px 18px;background:#3a1b22;color:var(--crit);overflow-wrap:anywhere}
+details>summary{cursor:pointer;padding:8px 0}
+[role="tabpanel"]>.panel{margin-bottom:14px}
+@media(max-width:900px){.topbar{flex-wrap:wrap;height:auto}.grid3{grid-template-columns:1fr}}
+@media(max-width:600px){.layout{display:block}.sidebar{max-height:240px;overflow:auto}.grid,.repeater-grid{grid-template-columns:1fr}.main{padding:12px}}

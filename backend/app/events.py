@@ -5,6 +5,7 @@ import json
 from typing import Any
 
 from .db import SessionLocal, Event
+from . import redact
 
 
 class EventBus:
@@ -31,7 +32,7 @@ class EventBus:
         persist: bool = True,
     ) -> dict:
         if not isinstance(body, str):
-            body = json.dumps(body, ensure_ascii=False, default=str)
+            body = json.dumps(redact.value(body), ensure_ascii=False, default=str)
 
         row_id = None
         if persist:
@@ -58,7 +59,8 @@ class EventBus:
             try:
                 q.put_nowait(payload)
             except asyncio.QueueFull:
-                dead.append(q)
+                q.get_nowait()
+                q.put_nowait({**payload,'gap':True})
         for q in dead:
             self._subscribers.discard(q)
         return payload

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-import httpx
+from ..guard import request
 
 # Patterns to pull interesting things out of JS bundles.
 ENDPOINT_RE = re.compile(
@@ -15,9 +15,9 @@ SECRET_RE = re.compile(
 
 
 async def fetch_js(url: str, timeout: float = 20.0, max_chars: int = 400_000) -> str:
-    async with httpx.AsyncClient(follow_redirects=True, verify=False, timeout=timeout) as client:
-        resp = await client.get(url, headers={"User-Agent": "ReconHawk/0.1"})
-        return resp.text[:max_chars]
+    resp = await request('GET', url, timeout=timeout, max_bytes=max_chars*4)
+    resp.raise_for_status()
+    return resp.text[:max_chars]
 
 
 def analyze(source: str) -> dict:

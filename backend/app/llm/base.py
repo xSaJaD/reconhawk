@@ -16,7 +16,10 @@ class LLM(Protocol):
     async def agent_loop(
         self, *, system: str, kickoff: str, tools: list[Tool],
         dispatch: Dispatch, emit: Emit, should_stop: ShouldStop, max_iterations: int,
+        on_usage=None, inbox=None, get_effort=None, initial_messages=None, on_checkpoint=None,
     ) -> str: ...
+
+    async def complete(self, system: str, user: str, on_usage=None) -> str: ...
 
 
 # Provider catalog for the UI model picker. Models are suggestions; any string is allowed.
@@ -46,7 +49,7 @@ PROVIDERS = {
         "label": "Custom (OpenAI-compatible: Ollama, Groq, LM Studio…)",
         "base_url_editable": True,
         "models": ["llama3.1", "qwen2.5", "mistral"],
-        "key_setting": "openai_api_key",
+        "key_setting": "custom_api_key",
     },
 }
 
@@ -62,16 +65,19 @@ def build_llm(cfg: dict, provider: str | None = None, model: str | None = None) 
         return AnthropicLLM(model=model or "claude-opus-5-5",
                             api_key=cfg.get("anthropic_api_key") or None, effort=effort)
 
-    # Everything else is OpenAI-compatible, differing only by base_url + key.
+    if provider not in ("openai", "openrouter", "custom"):
+        raise ValueError(f"Unsupported provider: {provider}")
+    # Each compatible provider owns its endpoint and credentials.
     from .openai_llm import OpenAICompatLLM
     if provider == "openrouter":
         base_url = "https://openrouter.ai/api/v1"
         api_key = cfg.get("openrouter_api_key") or None
     elif provider == "custom":
         # A fully independent custom endpoint (any OpenAI-compatible API).
-        base_url = cfg.get("custom_base_url") or cfg.get("openai_base_url") or "http://localhost:11434/v1"
-        api_key = cfg.get("custom_api_key") or cfg.get("openai_api_key") or None
+        base_url = cfg.get("custom_base_url") or "http://localhost:11434/v1"
+        api_key = cfg.get("custom_api_key") or None
     else:  # openai
         base_url = cfg.get("openai_base_url") or "https://api.openai.com/v1"
         api_key = cfg.get("openai_api_key") or None
-    return OpenAICompatLLM(model=model or "gpt-4o", api_key=api_key, base_url=base_url)
+    return OpenAICompatLLM(model=model or "gpt-4o", api_key=api_key, base_url=base_url,
+                           provider=provider, effort=effort)

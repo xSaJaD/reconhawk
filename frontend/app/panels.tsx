@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
+import {programType} from '../lib/programs';
+import {ScopeStatus} from './scope-status';
 
 export function Panel({ title, children, grow }: any) {
   return (
@@ -16,7 +18,7 @@ export function parseBody(b: string): any {
   try { return JSON.parse(b); } catch { return b; }
 }
 
-/* ---- Live-timeline row. Expandable for requests (full req/resp) & tool calls. ---- */
+/* ---- Live-activity row. Expandable for requests (full req/resp) & tool calls. ---- */
 function headersToText(h: any): string {
   if (!h) return "";
   if (typeof h === "string") { try { h = JSON.parse(h); } catch { return h; } }
@@ -32,6 +34,7 @@ export function TimelineItem({ e }: { e: any }) {
   const expandable = isReq || isTool;
   const statusCls = (st: number) =>
     st >= 500 ? "st-5xx" : st >= 400 ? "st-4xx" : st >= 300 ? "st-3xx" : "st-2xx";
+  const t = (() => { try { return new Date(e.created_at).toLocaleTimeString(); } catch { return ""; } })();
 
   return (
     <div className={"timeline-item" + (expandable ? " expandable" : "")}>
@@ -43,7 +46,7 @@ export function TimelineItem({ e }: { e: any }) {
         {isReq && b.classification && <span className="muted mono"> · {b.classification}</span>}
         {isReq && b.duration_ms != null && <span className="muted"> · {b.duration_ms}ms</span>}
         {isTool && <span className="muted mono"> {JSON.stringify(b.input).slice(0, 80)}</span>}
-        <div className="ts">{(() => { try { return new Date(e.created_at).toLocaleTimeString(); } catch { return ""; } })()}</div>
+        <div className="ts">{t}</div>
       </div>
       {open && isReq && (
         <div className="req-detail">
@@ -72,83 +75,132 @@ export function SettingsModal({ onClose }: any) {
   const [providers, setProviders] = useState<any>({});
   const [test, setTest] = useState<string>("");
   const [saved, setSaved] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [loadError, setLoadError] = useState("");
+  const [mainModels, setMainModels] = useState<Record<string, string>>({});
+  const [workerModels, setWorkerModels] = useState<Record<string, string>>({});
 
   useEffect(() => {
-    api.getSettings().then(setCfg).catch(() => {});
-    api.providers().then(setProviders).catch(() => {});
+    let active = true;
+    Promise.all([api.getSettings(), api.providers()]).then(([settings, catalog]) => {
+      if (!active) return;
+      setCfg({ ...settings, worker_provider: settings.worker_provider || (settings.worker_model ? settings.llm_provider : "") });
+      setProviders(catalog);
+      setMainModels({ [settings.llm_provider]: settings.llm_model || "" });
+      setWorkerModels({ [settings.worker_provider || settings.llm_provider]: settings.worker_model || "" });
+    }).catch((error: any) => { if (active) setLoadError(error.message); });
+    return () => { active = false; };
   }, []);
-  if (!cfg) return null;
+  if (!cfg) return <div className="modal-bg" onClick={onClose}><div className="modal" role="dialog" aria-modal="true" aria-labelledby="settings-heading" onClick={(e) => e.stopPropagation()}>
+    <h2 id="settings-heading">Settings</h2><p role={loadError ? "alert" : "status"}>{loadError || "Loading settings…"}</p><button onClick={onClose}>Close</button>
+  </div></div>;
 
   const prov = providers[cfg.llm_provider] || {};
-  const upd = (k: string, v: any) => setCfg({ ...cfg, [k]: v });
+  const workerEnabled = Boolean(cfg.worker_provider || cfg.worker_model);
+  const workerProvider = cfg.worker_provider || cfg.llm_provider;
+  const workerProv = providers[workerProvider] || {};
+  const upd = (k: string, v: any) => {
+    setCfg((current: any) => ({ ...current, [k]: v }));
+    setSaved(false); setTest("");
+  };
+  const changeMainProvider = (provider: string) => {
+    setMainModels((current) => ({ ...current, [cfg.llm_provider]: cfg.llm_model }));
+    setCfg((current: any) => ({ ...current, llm_provider: provider,
+      llm_model: mainModels[provider] ?? providers[provider]?.models?.[0] ?? "" }));
+    setSaved(false); setTest("");
+  };
+  const changeWorkerProvider = (provider: string) => {
+    setWorkerModels((current) => ({ ...current, [workerProvider]: cfg.worker_model }));
+    setCfg((current: any) => ({ ...current, worker_provider: provider,
+      worker_model: workerModels[provider] || providers[provider]?.models?.[0] || "" }));
+    setSaved(false); setTest("");
+  };
+  const toggleWorker = (enabled: boolean) => {
+    setCfg((current: any) => ({ ...current, worker_provider: enabled ? current.llm_provider : "",
+      worker_model: enabled ? current.llm_model : "" }));
+    setSaved(false); setTest("");
+  };
+  const credentials = (provider: string, prefix: string) => {
+    const key = ({ anthropic: "anthropic_api_key", openai: "openai_api_key", openrouter: "openrouter_api_key", custom: "custom_api_key" } as Record<string, string>)[provider];
+    const label = provider === "anthropic" ? "Anthropic (Claude)" : provider === "custom" ? "Custom" : providers[provider]?.label || provider;
+    return <>
+      {provider === "custom" && <div className="field"><label htmlFor={`${prefix}-base-url`}>Custom base URL</label><input id={`${prefix}-base-url`} disabled={busy} type="url" placeholder="http://localhost:11434/v1" value={cfg.custom_base_url || ""} onChange={(e) => upd("custom_base_url", e.target.value)} /></div>}
+      {provider === "openai" && <div className="field"><label htmlFor={`${prefix}-base-url`}>OpenAI base URL</label><input id={`${prefix}-base-url`} disabled={busy} type="url" placeholder="https://api.openai.com/v1" value={cfg.openai_base_url || ""} onChange={(e) => upd("openai_base_url", e.target.value)} /></div>}
+      {key && <div className="field"><label htmlFor={`${prefix}-api-key`}>{label} API key{provider === "custom" ? " (optional for local servers)" : ""}</label><input id={`${prefix}-api-key`} disabled={busy} type="password" autoComplete="new-password" spellCheck={false} value={cfg[key] || ""} onChange={(e) => upd(key, e.target.value)} /></div>}
+    </>;
+  };
 
-  const save = async () => { await api.putSettings(cfg); setSaved(true); setTimeout(() => setSaved(false), 1500); };
-  const runTest = async () => {
-    setTest("…");
-    await api.putSettings(cfg);
-    const r = await api.testProvider({ provider: cfg.llm_provider, model: cfg.llm_model });
-    setTest(r.ok ? `✓ ${r.reply}` : `✗ ${r.error}`);
+  const save = async () => {
+    setBusy(true); setTest("");
+    try {
+      const settings = await api.putSettings(cfg);
+      setCfg(settings);
+      document.documentElement.style.setProperty("--accent", settings.accent_color);
+      setSaved(true); setTimeout(() => setSaved(false), 1500);
+    } catch (error: any) { setTest(error.message); }
+    finally { setBusy(false); }
+  };
+  const runTest = async (worker = false) => {
+    setBusy(true); setSaved(false); setTest(worker ? "Testing worker connection…" : "Testing main connection…");
+    try {
+      const settings = await api.putSettings(cfg);
+      setCfg(settings);
+      const r = await api.testProvider({ provider: worker ? workerProvider : cfg.llm_provider,
+        model: worker ? cfg.worker_model || cfg.llm_model : cfg.llm_model });
+      setTest(r.ok ? `✓ ${worker ? "Worker" : "Main"}: ${r.reply}` : `✗ ${r.error}`);
+    } catch (error: any) { setTest(error.message); }
+    finally { setBusy(false); }
   };
 
   return (
     <div className="modal-bg" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h2>Settings — Agent & Providers</h2>
+      <div className="modal" role="dialog" aria-modal="true" aria-labelledby="settings-heading" onClick={(e) => e.stopPropagation()}>
+        <h2 id="settings-heading">Settings</h2>
 
-        <div className="field"><label>Provider</label>
-          <select value={cfg.llm_provider} onChange={(e) => upd("llm_provider", e.target.value)}>
+        <fieldset disabled={busy} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
+        <h3>Main model</h3>
+        <div className="field"><label htmlFor="main-provider">Provider</label>
+          <select id="main-provider" disabled={busy} value={cfg.llm_provider} onChange={(e) => changeMainProvider(e.target.value)}>
             {Object.entries(providers).map(([k, v]: any) => <option key={k} value={k}>{v.label}</option>)}
           </select>
         </div>
 
-        <div className="field"><label>Model</label>
-          <input list="models" value={cfg.llm_model} onChange={(e) => upd("llm_model", e.target.value)} />
-          <datalist id="models">{(prov.models || []).map((m: string) => <option key={m} value={m} />)}</datalist>
+        {credentials(cfg.llm_provider, "main")}
+        <div className="field"><label htmlFor="main-model">Model</label>
+          <input id="main-model" list="main-models" disabled={busy} value={cfg.llm_model} onChange={(e) => upd("llm_model", e.target.value)} />
+          <datalist id="main-models">{(prov.models || []).map((m: string) => <option key={m} value={m} />)}</datalist>
+          <small className="muted">Choose a suggestion or enter a model supported by this provider.</small>
         </div>
 
         {cfg.llm_provider === "anthropic" && (
-          <div className="field"><label>Effort</label>
-            <select value={cfg.llm_effort} onChange={(e) => upd("llm_effort", e.target.value)}>
+          <div className="field"><label htmlFor="main-effort">Effort</label>
+            <select id="main-effort" disabled={busy} value={cfg.llm_effort} onChange={(e) => upd("llm_effort", e.target.value)}>
               {["low", "medium", "high", "xhigh", "max"].map((x) => <option key={x}>{x}</option>)}
             </select></div>
         )}
 
-        <div className="repeater-grid">
-          <div className="field"><label>Worker provider (cheap steps — optional)</label>
-            <select value={cfg.worker_provider} onChange={(e) => upd("worker_provider", e.target.value)}>
-              <option value="">— same as main —</option>
-              {Object.entries(providers).map(([k, v]: any) => <option key={k} value={k}>{v.label}</option>)}
-            </select></div>
-          <div className="field"><label>Worker model (for verification, etc.)</label>
-            <input placeholder="e.g. claude-haiku-5-5 / gpt-4o-mini" value={cfg.worker_model} onChange={(e) => upd("worker_model", e.target.value)} /></div>
-        </div>
-
-        {/* Custom endpoint — any OpenAI-compatible API (Ollama, Groq, LM Studio, your own gateway…) */}
-        {(cfg.llm_provider === "custom" || cfg.worker_provider === "custom") && (
-          <div style={{ border: "1px solid var(--accent)", borderRadius: 8, padding: "10px 12px", margin: "10px 0" }}>
-            <div className="muted" style={{ fontSize: 11, marginBottom: 6 }}>🔌 CUSTOM ENDPOINT — any OpenAI-compatible API. Put the model name in the Model box above.</div>
-            <div className="repeater-grid">
-              <div className="field"><label>Custom base URL</label>
-                <input placeholder="https://your-host/v1" value={cfg.custom_base_url} onChange={(e) => upd("custom_base_url", e.target.value)} /></div>
-              <div className="field"><label>Custom API key (optional for local)</label>
-                <input type="password" value={cfg.custom_api_key} onChange={(e) => upd("custom_api_key", e.target.value)} /></div>
+        <div style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 12, margin: "12px 0" }}>
+          <label htmlFor="worker-enabled" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input id="worker-enabled" type="checkbox" style={{ width: "auto" }} disabled={busy} checked={workerEnabled} onChange={(e) => toggleWorker(e.target.checked)} />
+            Use a separate model for verification and specialists
+          </label>
+          {!workerEnabled && <p className="muted" style={{ fontSize: 12 }}>These steps use the main provider and model.</p>}
+          {workerEnabled && <>
+            <h3 style={{ marginTop: 12 }}>Worker model</h3>
+            <div className="field"><label htmlFor="worker-provider">Worker provider</label>
+              <select id="worker-provider" disabled={busy} value={workerProvider} onChange={(e) => changeWorkerProvider(e.target.value)}>
+                {Object.entries(providers).map(([k, v]: any) => <option key={k} value={k}>{v.label}</option>)}
+              </select>
             </div>
-          </div>
-        )}
-
-        <details>
-          <summary className="muted" style={{ cursor: "pointer", fontSize: 12, margin: "6px 0" }}>Other provider keys (Anthropic · OpenAI · OpenRouter)</summary>
-          <div className="repeater-grid">
-            <div className="field"><label>Anthropic API key</label>
-              <input type="password" value={cfg.anthropic_api_key} onChange={(e) => upd("anthropic_api_key", e.target.value)} /></div>
-            <div className="field"><label>OpenAI API key</label>
-              <input type="password" value={cfg.openai_api_key} onChange={(e) => upd("openai_api_key", e.target.value)} /></div>
-            <div className="field"><label>OpenRouter API key</label>
-              <input type="password" value={cfg.openrouter_api_key} onChange={(e) => upd("openrouter_api_key", e.target.value)} /></div>
-            <div className="field"><label>OpenAI base URL</label>
-              <input value={cfg.openai_base_url} onChange={(e) => upd("openai_base_url", e.target.value)} /></div>
-          </div>
-        </details>
+            {workerProvider !== cfg.llm_provider ? credentials(workerProvider, "worker") :
+              <p className="muted" style={{ fontSize: 12 }}>Uses the main provider's API key and connection settings.</p>}
+            <div className="field"><label htmlFor="worker-model">Worker model</label>
+              <input id="worker-model" list="worker-models" disabled={busy} placeholder={cfg.llm_model} value={cfg.worker_model || ""} onChange={(e) => upd("worker_model", e.target.value)} />
+              <datalist id="worker-models">{(workerProv.models || []).map((m: string) => <option key={m} value={m} />)}</datalist>
+            </div>
+            <button disabled={busy} onClick={() => runTest(true)}>Test worker connection</button>
+          </>}
+        </div>
 
         <div className="field"><label>Agent max iterations</label>
           <input value={cfg.agent_max_iterations} onChange={(e) => upd("agent_max_iterations", e.target.value)} /></div>
@@ -166,6 +218,14 @@ export function SettingsModal({ onClose }: any) {
             <input value={cfg.hackerone_username} onChange={(e) => upd("hackerone_username", e.target.value)} /></div>
           <div className="field"><label>API token</label>
             <input type="password" value={cfg.hackerone_token} onChange={(e) => upd("hackerone_token", e.target.value)} /></div>
+          <div className="field"><label>Sync scopes on startup</label>
+            <select value={cfg.h1_auto_sync} onChange={(e) => upd("h1_auto_sync", e.target.value)}><option value="true">on</option><option value="false">off</option></select></div>
+          <div className="field"><label>Parallel scope requests (1–16)</label>
+            <input value={cfg.h1_sync_concurrency} onChange={(e) => upd("h1_sync_concurrency", e.target.value)} /></div>
+          <div className="field"><label>Requests per second (1–10)</label>
+            <input value={cfg.h1_requests_per_second} onChange={(e) => upd("h1_requests_per_second", e.target.value)} /></div>
+          <div className="field"><label>Refresh scopes older than (hours, 0 = always)</label>
+            <input value={cfg.h1_scope_ttl_hours} onChange={(e) => upd("h1_scope_ttl_hours", e.target.value)} /></div>
         </div>
 
         <h2 style={{ fontSize: 14, marginTop: 10 }}>Automation</h2>
@@ -186,12 +246,21 @@ export function SettingsModal({ onClose }: any) {
             <input value={cfg.max_test_accounts} onChange={(e) => upd("max_test_accounts", e.target.value)} /></div>
         </div>
 
-        {test && <div className="mono" style={{ fontSize: 12, margin: "6px 0", color: test.startsWith("✓") ? "var(--accent)" : "var(--crit)" }}>{test}</div>}
+        <details><summary>Usage, limits, appearance and MCP</summary>
+        <div className="repeater-grid">{[['max_steps_per_task','Total model steps (0 = unlimited)'],['budget_usd_per_task','Task budget USD'],['max_subagents','Parallel specialists'],['subagent_max_iterations','Specialist iterations'],['max_passes','Continuation passes']].map(([key,label])=><div className="field" key={key}><label>{label}</label><input type="number" min="0" value={cfg[key]} onChange={e=>upd(key,e.target.value)}/></div>)}</div>
+        <div className="field"><label>Enforce scope</label><select value={cfg.scope_enforced} onChange={e=>upd('scope_enforced',e.target.value)}><option value="true">on</option><option value="false">off</option></select></div>
+        <div className="field"><label>Accent</label><input type="color" value={cfg.accent_color} onChange={e=>upd('accent_color',e.target.value)}/></div>
+        <p className="muted">Use trusted MCP servers with explicit tool allowlists. Servers must enforce their own outbound scope. Local stdio also requires shell enabled.</p>
+        <select value={cfg.enable_mcp} onChange={e=>upd('enable_mcp',e.target.value)}><option value="false">MCP disabled</option><option value="true">MCP enabled</option></select>
+        <textarea aria-label="MCP servers JSON" rows={6} value={cfg.mcp_servers} onChange={e=>upd('mcp_servers',e.target.value)}/>
+        </details>
+        </fieldset>
+        {test && <div role="status" className="mono" style={{ fontSize: 12, margin: "6px 0", color: test.startsWith("✓") ? "var(--accent)" : "var(--crit)" }}>{test}</div>}
         <div className="row" style={{ justifyContent: "space-between" }}>
-          <button onClick={runTest}>Test connection</button>
+          <button disabled={busy} onClick={() => runTest()}>Test main connection</button>
           <div className="row">
             <button onClick={onClose}>Close</button>
-            <button className="primary" onClick={save}>{saved ? "Saved ✓" : "Save"}</button>
+            <button disabled={busy} className="primary" onClick={save}>{busy ? "Working…" : saved ? "Saved ✓" : "Save"}</button>
           </div>
         </div>
       </div>
@@ -310,6 +379,7 @@ export function OverviewStrip({ taskId, refreshKey }: any) {
       <Stat label="Repeater" value={ov.repeater} />
       <Stat label="Files" value={ov.files} />
       <Stat label="Duration" value={dur} />
+      {ov.cost?.price_unknown&&<span className="pill">Partial cost: unknown model pricing</span>}
       {ov.cost && <Stat label="Cost" value={ov.cost.usd ? `$${ov.cost.usd.toFixed(3)}` : `${((ov.cost.tokens_in + ov.cost.tokens_out) / 1000).toFixed(1)}k tok`} accent="var(--warn)" />}
     </div>
   );
@@ -469,6 +539,53 @@ export function WorkspacePanel({ taskId, refreshKey }: any) {
   );
 }
 
+/* ------------------------- One skill row: toggle · edit · delete ------------------------- */
+function SkillRow({ s, flash, reload }: any) {
+  const [editing, setEditing] = useState(false);
+  const [summary, setSummary] = useState(s.summary || "");
+  const [playbook, setPlaybook] = useState(s.playbook || "");
+  return (
+    <div className="timeline-item">
+      <div className="row" style={{ justifyContent: "space-between" }}>
+        <span><span className="kind-tag">{s.category}</span><strong>{s.name}</strong>
+          {s.is_custom && <span className="pill" style={{ marginLeft: 6 }}>custom</span>}</span>
+        <span className="row" style={{ gap: 4 }}>
+          <button onClick={async () => { await api.toggleSkill(s.name); reload(); }}
+            className={s.enabled ? "primary" : ""} style={{ fontSize: 10, padding: "2px 8px" }}>
+            {s.enabled ? "on" : "off"}
+          </button>
+          <button style={{ fontSize: 10, padding: "2px 6px" }}
+            onClick={() => { setSummary(s.summary || ""); setPlaybook(s.playbook || ""); setEditing(!editing); }}>
+            {editing ? "cancel" : "edit"}
+          </button>
+          <button className="danger" style={{ fontSize: 10, padding: "2px 6px" }}
+            onClick={async () => {
+              if (!confirm(`Delete skill "${s.name}"? Built-ins stay deleted across restarts.`)) return;
+              try { await api.deleteSkill(s.name); flash("deleted"); reload(); }
+              catch (e: any) { flash("delete failed: " + e.message); }
+            }}>×</button>
+        </span>
+      </div>
+      {editing ? (
+        <div style={{ marginTop: 6 }}>
+          <input aria-label="Skill summary" value={summary} onChange={(e) => setSummary(e.target.value)}
+            placeholder="summary" style={{ width: "100%", fontSize: 11, marginBottom: 4 }} />
+          <textarea aria-label="Skill playbook" value={playbook} onChange={(e) => setPlaybook(e.target.value)}
+            rows={8} style={{ width: "100%", fontSize: 11, fontFamily: "monospace" }} />
+          <button className="primary" style={{ fontSize: 10, marginTop: 4 }}
+            onClick={async () => {
+              try { await api.editSkill(s.name, { summary, playbook }); flash("saved"); setEditing(false); reload(); }
+              catch (e: any) { flash("save failed: " + e.message); }
+            }}>save</button>
+        </div>
+      ) : (
+        <details><summary className="muted" style={{ fontSize: 11, cursor: "pointer" }}>{s.summary}</summary>
+          <pre style={{ fontSize: 10, whiteSpace: "pre-wrap" }}>{s.playbook}</pre></details>
+      )}
+    </div>
+  );
+}
+
 /* ------------------------- Knowledge view (Memory · Skills · Pending Addenda) ------------------------- */
 export function KnowledgeView() {
   const [mem, setMem] = useState<any[]>([]);
@@ -578,22 +695,7 @@ export function KnowledgeView() {
           </h3>
           <div className="body">
             {skills.map((s) => (
-              <div key={s.name} className="timeline-item">
-                <div className="row" style={{ justifyContent: "space-between" }}>
-                  <span><span className="kind-tag">{s.category}</span><strong>{s.name}</strong>
-                    {s.is_custom && <span className="pill" style={{ marginLeft: 6 }}>custom</span>}</span>
-                  <span className="row">
-                    <button onClick={async () => { await api.toggleSkill(s.name); load(); }}
-                      className={s.enabled ? "primary" : ""} style={{ fontSize: 10, padding: "2px 8px" }}>
-                      {s.enabled ? "on" : "off"}
-                    </button>
-                    {s.is_custom && <button className="danger" style={{ fontSize: 10, padding: "2px 6px" }}
-                      onClick={async () => { await api.deleteSkill(s.name); load(); }}>×</button>}
-                  </span>
-                </div>
-                <details><summary className="muted" style={{ fontSize: 11, cursor: "pointer" }}>{s.summary}</summary>
-                  <pre style={{ fontSize: 10 }}>{s.playbook}</pre></details>
-              </div>
+              <SkillRow key={s.name} s={s} flash={flash} reload={load} />
             ))}
           </div>
         </div>
@@ -664,6 +766,7 @@ async function copy(text: string) {
 }
 
 export function FindingCard({ f, onChange }: any) {
+  const [proof,setProof]=useState((f.evidence_ids||[]).join(', '));
   const [adds, setAdds] = useState<any[]>([]);
   const [open, setOpen] = useState(false);
   const [kind, setKind] = useState("poc");
@@ -703,6 +806,7 @@ export function FindingCard({ f, onChange }: any) {
         </div>
       </div>
       <div className="muted" style={{ fontSize: 12, margin: "4px 0" }}>{f.summary}</div>
+      <details><summary>Proof requests · quality {f.evidence_score||0}/100</summary><div className="row"><input aria-label="Proof request IDs" value={proof} onChange={e=>setProof(e.target.value)} placeholder="12, 15"/><button onClick={async()=>{try{const ids=proof.split(',').filter((x:string)=>x.trim()).map(Number);if(ids.some((i:number)=>!Number.isInteger(i)||i<1))throw Error('Positive request IDs required');await api.linkEvidence(f.id,ids);onChange();flash('Linked; verify again');}catch(e:any){flash(e.message);}}}>Link evidence</button></div></details>
       {f.verdict && <div className="mono" style={{ fontSize: 11, color: "var(--muted)" }}>{f.verdict}</div>}
 
       <div className="row" style={{ gap: 6, margin: "8px 0", flexWrap: "wrap" }}>
@@ -805,7 +909,7 @@ export function NewTaskModal({ programs, onClose, onCreated }: any) {
 /* ------------------------- New program modal ------------------------- */
 export function NewProgramModal({ onClose, onCreated }: any) {
   const [name, setName] = useState(""); const [platform, setPlatform] = useState("manual");
-  const [ptype, setPtype] = useState("bbp");
+  const [ptype, setPtype] = useState("bounty");
   const [scopeIn, setScopeIn] = useState(""); const [scopeOut, setScopeOut] = useState("");
   const [policy, setPolicy] = useState(""); const [busy, setBusy] = useState(false); const [err, setErr] = useState("");
   const create = async () => {
@@ -832,9 +936,9 @@ export function NewProgramModal({ onClose, onCreated }: any) {
             </select></div>
           <div className="field"><label>Type</label>
             <select value={ptype} onChange={(e) => setPtype(e.target.value)}>
-              <option value="bbp">BBP (paid bounty)</option>
               <option value="bounty">Bounty</option>
               <option value="vdp">VDP (disclosure only)</option>
+              <option value="unknown">Unknown</option>
             </select></div>
         </div>
         <div className="field"><label>In-scope hosts (comma / newline). Supports *.example.com</label>
@@ -869,14 +973,14 @@ export function ProgramIcon({ p, size = 26 }: any) {
   );
 }
 
-const TYPE_BADGE: any = { bbp: { t: "BBP", c: "sev-low" }, bounty: { t: "BOUNTY", c: "sev-low" }, vdp: { t: "VDP", c: "sev-medium" } };
+const TYPE_BADGE: any = { bounty: { t: "BOUNTY", c: "sev-low" }, vdp: { t: "VDP", c: "sev-medium" }, unknown: {t: 'UNKNOWN', c: 'sev-info'} };
 export function TypeBadge({ type }: any) {
-  const b = TYPE_BADGE[type] || TYPE_BADGE.bbp;
+  const b = TYPE_BADGE[programType(type)];
   return <span className={"badge " + b.c}>{b.t}</span>;
 }
 
 /* ------------------------- Program detail modal ------------------------- */
-export function ProgramDetailModal({ program, onClose, onScan }: any) {
+export function ProgramDetailModal({ program, onClose, onScan, onRetryScope }: any) {
   const [busy, setBusy] = useState(false); const [err, setErr] = useState("");
   const [idents, setIdents] = useState<any[]>([]);
   const [showId, setShowId] = useState(false);
@@ -906,6 +1010,14 @@ export function ProgramDetailModal({ program, onClose, onScan }: any) {
             </div>
           </div>
         </div>
+        <ScopeStatus program={program} onRetry={onRetryScope} />
+        {(program.scope_assets || []).length > 0 && <details><summary>Structured scope assets ({program.scope_assets.length})</summary>
+          {program.scope_assets.map((asset: any, index: number) => <div className="endpoint" key={index}>
+            <b>{asset.asset_identifier}</b> · {asset.asset_type} · {asset.normalization_status}
+            <div className="muted">{asset.normalization_reason}</div>
+            {asset.instruction && <pre>{asset.instruction}</pre>}
+          </div>)}
+        </details>}
         <div className="field"><label>In scope ({(program.scope_in || []).length})</label>
           <pre style={{ maxHeight: 140 }}>{(program.scope_in || []).join("\n") || "— (scope still syncing or none)"}</pre></div>
         {(program.scope_out || []).length > 0 && (
@@ -1023,7 +1135,7 @@ export function RepeaterPanel({ taskId, history, onSent }: any) {
               <div key={r.id} className="endpoint">
                 <span className="method">{r.method}</span>
                 <span className={r.status_code && r.status_code < 400 ? "sev-low" : "sev-high"}> {r.status_code}</span> {r.url}
-                <span className="muted"> · {r.duration_ms}ms</span>
+                <span className="muted"> · #{r.id} · {r.duration_ms}ms</span><button onClick={async()=>{try{await api.instruct(taskId,`Review captured request #${r.id}: ${r.method} ${r.url}`);}catch(e:any){setErr(e.message);}}}>Instruct agent</button>
               </div>
             ))}
           </div>

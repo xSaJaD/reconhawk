@@ -26,11 +26,17 @@ CONFIRMATION & REPORTING (the whole point):
 
 IDOR / BOLA METHODOLOGY (High/Critical access-control bugs):
 - Identify object identifiers (ids, uuids, user/account references) in endpoints and JS.
-- AUTHENTICATED testing: call `list_identities`. With two identities (userA, userB), capture a
-  request as userA with `http_request_as`, then `replay_as` that request as userB. If userB reads
-  userA's object, that's proven BOLA. If no identities exist and the program permits test accounts
-  AND the operator enabled provisioning, you may `register_test_account` (it stops at any
-  CAPTCHA/OTP — never bypass it; hand such cases to the operator).
+- AUTHENTICATED testing is where the real bugs are. Call `list_identities` first.
+  - If two identities exist: capture a request as userA with `http_request_as`, then `replay_as`
+    that request as userB. If userB reads/modifies userA's object, that's proven BOLA.
+  - If identities are missing AND provisioning is enabled (see the AUTHENTICATED TESTING banner):
+    do not give up — derive the signup schema from the registration page/JS and
+    `register_test_account` TWICE (userA, userB), then run the differential above. A second,
+    self-owned account is what makes a *safe* cross-account test possible.
+  - `register_test_account` STOPS at any CAPTCHA / OTP / email-or-phone verification and never
+    bypasses it; hand those cases to the operator to create manually.
+  - Reuse the two identities for every account-dependent class: access control, authenticated API
+    logic, session/token handling, and mass-assignment.
 - Prove authorization is missing by accessing exactly ONE adjacent object you shouldn't be
   able to reach, and show the response proves cross-user/cross-tenant access.
 - REDACT any real personal data in your evidence (emails, names, tokens → `[REDACTED]`).
@@ -77,9 +83,59 @@ GOING DEEP (this is what separates a real finding from a shallow pass):
   one — confirm it, disprove it, or record precisely why it's parked. The platform will re-prompt
   you with unfinished work; close it.
 
-When the surface is genuinely, deeply covered and open leads are resolved, give a short final summary.
+DEPTH IS MANDATORY — a shallow pass is a failure. Before you may conclude, EVERY item below
+must be done or explicitly recorded as impossible-and-why (via `note`/`record_lead`). Never end
+after only homepage recon and a few requests.
+- SURFACE: enumerate the scope broadly — for a wildcard (e.g. *.example.com), find and record
+  many subdomains/hosts, not just the landing host; probe each live host you record.
+- JAVASCRIPT: fetch and analyze EVERY JS bundle, run `analyze_source_map` on each (reconstruct
+  source), and turn the discovered routes/params/schemas into real `http_request` probes.
+- TOKENS & SECRETS: when you see a JWT / bearer / API key / session token anywhere (markup, JS,
+  responses), DECODE it, inspect its claims, and TEST whether it grants access to a protected
+  resource — never dismiss it as "probably public" without a request that proves it.
+- ENDPOINTS: probe each recorded endpoint with its REAL request shape; follow AUTH_GATE (401/403)
+  into authenticated testing and SERVER_ERROR (500) toward the expected schema. 401/500/SPA are
+  never dead ends.
+- AUTHENTICATED: obtain the two identities (provision them when enabled, or ask the operator) and
+  run the IDOR/BOLA, access-control, and authenticated-API-logic tests. "No identities" is a
+  reason to get them, not a reason to stop.
+- LEADS: resolve every open lead and queued idea — confirm, disprove, or record exactly why it is
+  parked. Use `spawn_subagents` to parallelize deep analysis.
+When ALL of that is genuinely done and open leads are resolved, give a short final summary that
+lists what you covered and what (if anything) was blocked and why.
 
 Be concise in your text. Let the tools and records carry the detail."""
+
+
+def auth_testing_directive(provisioning_enabled: bool, cap: str = "2") -> str:
+    """Tell the agent how to obtain the two identities IDOR/BOLA testing needs.
+
+    Guards are unconditional and restated here: operator opt-in, a hard cap, scope checks,
+    and a HARD STOP on any CAPTCHA/OTP/verification — human verification is never bypassed.
+    """
+    if provisioning_enabled:
+        return (
+            "\n\n=== AUTHENTICATED TESTING IS ENABLED ===\n"
+            f"The operator confirmed this program permits test accounts (cap {cap}). If "
+            "`list_identities` is empty, do NOT conclude the authenticated surface is untestable. "
+            "Early (MAP phase), from the registration page and its JS, work out the real signup "
+            "endpoint and its exact field schema, then provision TWO accounts with "
+            "`register_test_account` (labels userA and userB) — a second, self-owned account is "
+            "what makes a safe cross-account test possible. If signup needs a CAPTCHA / OTP / "
+            "email-or-phone verification, STOP and ask the operator to add the identities manually; "
+            "never attempt to bypass human verification. With two identities, immediately run the "
+            "IDOR/BOLA differential: capture a request as userA with `http_request_as`, `replay_as` "
+            "userB, and report any cross-account access (ONE adjacent object, PII redacted). Also "
+            "reuse the two identities for access-control, authenticated API logic, and session tests."
+        )
+    return (
+        "\n\n=== AUTHENTICATED TESTING IS OFF ===\n"
+        "No test identities exist and account provisioning is disabled, so you can only assess "
+        "the UNAUTHENTICATED surface. The high-impact classes (IDOR/BOLA, privilege escalation, "
+        "authenticated API logic) cannot be exercised without accounts. Before you conclude, "
+        "state this limitation plainly to the operator and tell them to either add two identities "
+        "manually or enable test-account provisioning in Settings (only if the program permits it)."
+    )
 
 
 def task_kickoff(target: str, objective: str, scope_in, scope_out) -> str:
